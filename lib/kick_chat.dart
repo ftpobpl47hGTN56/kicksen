@@ -1,35 +1,64 @@
 /// Real-time Kick.com chat client.
 ///
 /// Reading chat requires no authentication: Kick delivers chat over a public
-/// Pusher WebSocket — the same one the kick.com frontend uses. Sending
-/// messages is done separately through the official Kick API
+/// Pusher WebSocket. Since October 2026 the Pusher app is **per-channel and
+/// dynamic**: the client asks `web.kick.com/api/v1/realtime/...` which app
+/// key/cluster to use (the old hardcoded key `32cbd69e4b950bf97679` now
+/// returns Pusher error 4001). This client replicates that flow and keeps a
+/// compiled-in fallback config.
+///
+/// Sending messages is done separately through the official Kick API
 /// (`https://api.kick.com/public/v1`) with OAuth 2.1 — see `kick_oauth.dart`
 /// and `kick_api.dart`.
 ///
-/// Note: the Pusher endpoint and the channel-lookup REST call are
-/// undocumented/internal and may change without notice.
+/// Note: these endpoints are undocumented/internal and may change without
+/// notice.
 library kick_chat;
 
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Process;
+import 'dart:math';
 
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
-/// Pusher endpoint used by the kick.com frontend.
-const String kKickPusherUrl =
-    'wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679'
-    '?protocol=7&client=js&version=7.6.0&flash=false';
-
 /// Pusher event carrying a chat message.
 const String kChatMessageEvent = r'App\Events\ChatMessageEvent';
 
-/// Browser UA used for the internal channel-lookup endpoint.
+/// Browser UA used for the internal endpoints (they sit behind Cloudflare).
 const String kBrowserUserAgent =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
     'AppleWebKit/537.36 (KHTML, like Gecko) '
     'Chrome/120.0.0.0 Safari/537.36';
+
+/// URL of the full-size image for an emote (from `[emote:{id}:{name}]` tokens).
+String kickEmoteUrl(String id) => 'https://files.kick.com/emotes/$id/fullsize';
+
+/// Which Pusher app to connect to. Since 2026-10 this is resolved at runtime
+/// per channel; [fallback] is the last known-good compiled-in value.
+class KickPusherConfig {
+  const KickPusherConfig({required this.appKey, required this.cluster});
+
+  /// Last known-good config (observed 2026-11), used when the realtime
+  /// config endpoint is unreachable.
+  static const fallback = KickPusherConfig(appKey: '34bf7a0ff419a2a775b9', cluster: 'us2');
+
+  final String appKey;
+  final String cluster;
+
+  /// Same version parameters the kick.com web client sends.
+  String get url =>
+      'wss://ws-$cluster.pusher.com/app/$appKey'
+      '?protocol=7&client=js&version=8.4.0&flash=false';
+}
+
+/// IDs of a Kick channel, resolved from its slug.
+class KickChannelIds {
+  const KickChannelIds({required this.channelId, required this.chatroomId});
+  final int channelId;
+  final int chatroomId;
+}
 
 enum KickChatStatus { resolving, connecting, connected, reconnecting, disconnected }
 
@@ -82,18 +111,28 @@ class KickChatMessage {
     required this.content,
     required this.sender,
     this.createdAt,
+    this.replyToSender,
+    this.replyToContent,
     this.raw = const {},
   });
 
   final String id;
   final int chatroomId;
+
+  /// `message` or `reply`.
   final String type;
 
-  /// Raw message text. Emotes arrive as `[emote:ID:name]` tokens.
+  /// Raw message text. Emotes arrive as `[emote:ID:name]` tokens —
+  /// resolve them with [kickEmoteUrl].
   final String content;
 
   final KickChatSender sender;
   final DateTime? createdAt;
+
+  /// For `type == 'reply'`: the author and text of the quoted message.
+  final String? replyToSender;
+  final String? replyToContent;
+
   final Map<String, dynamic> raw;
 }
 
@@ -120,17 +159,24 @@ class KickChatClient {
   StreamSubscription<dynamic>? _wsSub;
   Timer? _keepalive;
   bool _closed = true;
-  int? _chatroomId;
 
-  /// Resolves the numeric chatroom ID for a channel slug.
+  KickChannelIds? _ids;
+  KickPusherConfig? _config;
+
+  static final _random = Random.secure();
+
+  // ---------------------------------------------------------------------------
+  // Channel + realtime config resolution
+  // ---------------------------------------------------------------------------
+
+  /// Resolves channel and chatroom IDs for a channel slug.
   ///
   /// Uses Kick's internal `api/v2` endpoint because the official API does not
   /// expose chatroom IDs. The endpoint sits behind Cloudflare: Dart's HTTP
   /// stack gets TLS-fingerprint-blocked on many networks (HTTP 403), so on
   /// failure we fall back to a `curl` subprocess — the same workaround other
-  /// Kick libraries use. If both fail, call [connectByChatroomId] with an ID
-  /// taken from a real browser.
-  Future<int> resolveChatroomId(String channel) async {
+  /// Kick libraries use.
+  Future<KickChannelIds> resolveChannelIds(String channel) async {
     try {
       final resp = await _http
           .get(
@@ -143,21 +189,16 @@ class KickChatClient {
           )
           .timeout(const Duration(seconds: 20));
       if (resp.statusCode == 200) {
-        final id = _parseChatroomId(resp.body);
-        if (id != null) return id;
+        final ids = _parseChannelIds(resp.body);
+        if (ids != null) return ids;
       }
     } catch (_) {
       // Fall through to the curl fallback.
     }
-    return _resolveViaCurl(channel);
+    return _resolveChannelIdsViaCurl(channel);
   }
 
-  /// Fallback for [resolveChatroomId] when Cloudflare blocks Dart's TLS
-  /// fingerprint: shells out to `curl`, which presents a browser-like
-  /// fingerprint on most systems. Requires curl in PATH (present by default
-  /// on macOS/Linux/Windows 10+; inside Flutter apps on mobile the Dart HTTP
-  /// path usually works because the request comes from a residential IP).
-  Future<int> _resolveViaCurl(String channel) async {
+  Future<KickChannelIds> _resolveChannelIdsViaCurl(String channel) async {
     try {
       final result = await Process.run('curl', [
         '-s',
@@ -172,41 +213,99 @@ class KickChatClient {
         'https://kick.com/api/v2/channels/$channel',
       ]);
       if (result.exitCode == 0) {
-        final id = _parseChatroomId(result.stdout as String);
-        if (id != null) return id;
+        final ids = _parseChannelIds(result.stdout as String);
+        if (ids != null) return ids;
       }
     } catch (_) {
       // curl missing or failed — handled below.
     }
     throw KickChatException(
-      'could not resolve chatroom id for "$channel" (Cloudflare blocked the '
-      'request). Use connectByChatroomId() with an ID taken from '
-      'https://kick.com/api/v2/channels/$channel in a browser.',
+      'could not resolve ids for "$channel" (Cloudflare blocked the request). '
+      'Open https://kick.com/api/v2/channels/$channel in a browser and pass '
+      'the ids via connectByIds().',
     );
   }
 
-  static int? _parseChatroomId(String body) {
+  static KickChannelIds? _parseChannelIds(String body) {
     try {
       final data = jsonDecode(body) as Map<String, dynamic>;
-      final id = (data['chatroom'] as Map<String, dynamic>?)?['id'];
-      return id is int ? id : null;
-    } catch (_) {
-      return null;
-    }
+      final channelId = data['id'];
+      final chatroomId = (data['chatroom'] as Map<String, dynamic>?)?['id'];
+      if (channelId is int && chatroomId is int) {
+        return KickChannelIds(channelId: channelId, chatroomId: chatroomId);
+      }
+    } catch (_) {}
+    return null;
   }
 
-  /// Resolves the chatroom ID and starts listening.
+  /// Asks Kick which Pusher app serves this channel's chat — the same call
+  /// the kick.com frontend makes on every page load. Falls back to
+  /// [KickPusherConfig.fallback] when the endpoint is unreachable.
+  Future<KickPusherConfig> fetchRealtimeConfig(int channelId) async {
+    try {
+      final resp = await _http
+          .post(
+            Uri.parse('https://web.kick.com/api/v1/realtime'
+                '/channels/$channelId/chat/connection'),
+            headers: {
+              'User-Agent': kBrowserUserAgent,
+              'Accept': 'application/json',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({
+              'client': {
+                'id': List.generate(
+                    16, (_) => _random.nextInt(256).toRadixString(16).padLeft(2, '0')).join(),
+                'type': 'web',
+              },
+              'capabilities': {
+                'accepted_providers': [
+                  {'provider': 'pusher'},
+                ],
+              },
+            }),
+          )
+          .timeout(const Duration(seconds: 20));
+      if (resp.statusCode == 200) {
+        final data = jsonDecode(resp.body) as Map<String, dynamic>;
+        final connections =
+            ((data['data'] as Map<String, dynamic>?)?['connections'] as List?) ?? const [];
+        for (final conn in connections.whereType<Map<String, dynamic>>()) {
+          if (conn['provider'] == 'pusher') {
+            final creds = (conn['credentials'] as Map<String, dynamic>?) ?? const {};
+            final key = creds['app_key'];
+            final cluster = creds['cluster'];
+            if (key is String && cluster is String) {
+              return KickPusherConfig(appKey: key, cluster: cluster);
+            }
+          }
+        }
+      }
+    } catch (_) {
+      // Fall through to the compiled-in fallback.
+    }
+    return KickPusherConfig.fallback;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Connection lifecycle
+  // ---------------------------------------------------------------------------
+
+  /// Resolves the channel IDs + realtime config and starts listening.
   Future<void> connect(String channel) async {
     _closed = false;
     _emitStatus(KickChatStatus.resolving);
-    _chatroomId = await resolveChatroomId(channel);
+    _ids = await resolveChannelIds(channel);
+    _config = await fetchRealtimeConfig(_ids!.channelId);
     await _openSocket();
   }
 
-  /// Starts listening with a known chatroom ID (skips the REST lookup).
-  Future<void> connectByChatroomId(int chatroomId) async {
+  /// Starts listening with known IDs (skips the REST lookups, uses the
+  /// fallback Pusher config).
+  Future<void> connectByIds({required int channelId, required int chatroomId}) async {
     _closed = false;
-    _chatroomId = chatroomId;
+    _ids = KickChannelIds(channelId: channelId, chatroomId: chatroomId);
+    _config = KickPusherConfig.fallback;
     await _openSocket();
   }
 
@@ -228,12 +327,14 @@ class KickChatClient {
   }
 
   Future<void> _openSocket() async {
+    final config = _config ?? KickPusherConfig.fallback;
     _emitStatus(KickChatStatus.connecting);
     try {
-      final ws = WebSocketChannel.connect(Uri.parse(kKickPusherUrl));
+      final ws = WebSocketChannel.connect(Uri.parse(config.url));
       _ws = ws;
       await ws.ready;
       _wsSub = ws.stream.listen(_onFrame, onDone: _onDone, onError: (_) => _onDone());
+      // Server activity_timeout is 120 s; ping well within it.
       _keepalive = Timer.periodic(const Duration(seconds: 30), (_) {
         _send({'event': 'pusher:ping', 'data': const {}});
       });
@@ -255,8 +356,10 @@ class KickChatClient {
       case 'pusher:connection_established':
         _send({
           'event': 'pusher:subscribe',
-          'data': {'auth': '', 'channel': 'chatrooms.$_chatroomId.v2'},
+          'data': {'auth': '', 'channel': 'chatrooms.${_ids!.chatroomId}.v2'},
         });
+      case 'pusher:error':
+        _handlePusherError(event['data']);
       case 'pusher_internal:subscription_succeeded':
         _emitStatus(KickChatStatus.connected);
       case kChatMessageEvent:
@@ -265,6 +368,32 @@ class KickChatClient {
       default:
         if (!_events.isClosed) _events.add(event);
     }
+  }
+
+  /// Pusher errors 4000–4099 mean the connection is not retryable with the
+  /// current config (e.g. 4001 "app key not in this cluster" — Kick rotated
+  /// the app). Re-ask the realtime config endpoint and reconnect.
+  void _handlePusherError(dynamic rawData) {
+    int code = 0;
+    try {
+      final data = rawData is String ? jsonDecode(rawData) : rawData;
+      code = (data as Map<String, dynamic>)['code'] as int? ?? 0;
+    } catch (_) {}
+    if (code >= 4000 && code < 4100 && _ids != null && !_closed) {
+      _config = null; // force re-resolution
+      unawaited(fetchRealtimeConfig(_ids!.channelId).then((config) async {
+        _config = config;
+        await _teardownSocket();
+        if (!_closed) await _openSocket();
+      }));
+    }
+  }
+
+  Future<void> _teardownSocket() async {
+    _keepalive?.cancel();
+    await _wsSub?.cancel();
+    await _ws?.sink.close();
+    _ws = null;
   }
 
   void _onDone() {
@@ -281,6 +410,10 @@ class KickChatClient {
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // Message parsing
+  // ---------------------------------------------------------------------------
+
   KickChatMessage? _parseMessage(dynamic raw) {
     try {
       final decoded = raw is String ? jsonDecode(raw) : raw;
@@ -291,9 +424,11 @@ class KickChatClient {
           .whereType<Map<String, dynamic>>()
           .map(KickBadge.fromJson)
           .toList();
+      final originalSender = (map['original_sender'] as Map<String, dynamic>?) ?? const {};
+      final originalMessage = (map['original_message'] as Map<String, dynamic>?) ?? const {};
       return KickChatMessage(
         id: map['id'] as String? ?? '',
-        chatroomId: map['chatroom_id'] as int? ?? _chatroomId ?? 0,
+        chatroomId: map['chatroom_id'] as int? ?? _ids?.chatroomId ?? 0,
         type: map['type'] as String? ?? 'message',
         content: map['content'] as String? ?? '',
         sender: KickChatSender(
@@ -304,6 +439,8 @@ class KickChatClient {
           badges: badges,
         ),
         createdAt: DateTime.tryParse(map['created_at'] as String? ?? ''),
+        replyToSender: originalSender['username'] as String?,
+        replyToContent: originalMessage['content'] as String?,
         raw: map,
       );
     } catch (_) {
@@ -314,4 +451,7 @@ class KickChatClient {
   void _emitStatus(KickChatStatus s) {
     if (!_status.isClosed) _status.add(s);
   }
+
+  /// Silence unused-import lints for unawaited futures.
+  void unawaited(Future<void> future) {}
 }

@@ -6,7 +6,7 @@ Cross-platform **Kick** chat client — a Chatsen-style app for [Kick.com](https
 
 `kick_chat` is a pure-Dart package that already does the two hardest parts:
 
-- **Reading** live chat in real time over Kick's public Pusher WebSocket — no auth.
+- **Reading** live chat in real time over Kick's Pusher WebSocket — no auth.
 - **Writing** to chat via the **official** Kick API with OAuth 2.1 (PKCE) login.
 
 The Flutter UI (ported from [Chatsen](https://github.com/chatsen/chatsen)) comes next.
@@ -66,16 +66,16 @@ await api.sendMessage(
 
 ## How reading works
 
-1. Resolves the numeric `chatroom_id` for a channel slug via `kick.com/api/v2/channels/{slug}` (internal API — the official API does not expose it). This endpoint sits behind Cloudflare: if Dart's TLS fingerprint gets blocked (HTTP 403), the client automatically falls back to a `curl` subprocess, and you can always pass a browser-resolved ID via `connectByChatroomId()`.
-2. Connects to Kick's public Pusher WebSocket (`ws-us2.pusher.com`).
-3. Subscribes to `chatrooms.{id}.v2` and parses `App\Events\ChatMessageEvent` frames.
-4. Auto-reconnects on drops, keepalive ping every 30 s.
+1. **IDs**: resolves `channel_id` + `chatroom_id` for a slug via `kick.com/api/v2/channels/{slug}` (internal API). The endpoint sits behind Cloudflare: if Dart's TLS fingerprint gets blocked (HTTP 403), the client automatically falls back to a `curl` subprocess; you can also pass browser-resolved IDs via `connectByIds()`.
+2. **Realtime config**: since October 2026 the Pusher app is dynamic and per-channel — the client asks `POST web.kick.com/api/v1/realtime/channels/{id}/chat/connection` for the current `app_key` + `cluster` (the old hardcoded key now returns Pusher error 4001). A compiled-in fallback config is used if the endpoint is unreachable, and a fatal Pusher error (4000–4099) triggers a re-resolution.
+3. **Socket**: subscribes to `chatrooms.{chatroom_id}.v2`, parses `App\Events\ChatMessageEvent` frames (sender color, badges, replies). Keepalive ping every 30 s, auto-reconnect on drops.
+4. Emotes arrive as `[emote:{id}:{name}]` tokens; full-size images at `https://files.kick.com/emotes/{id}/fullsize` (helper: `kickEmoteUrl`).
 
 ## API coverage
 
 | Feature | Mechanism | Status |
 |---|---|---|
-| Read live chat | Pusher WebSocket (no auth) | ✅ |
+| Read live chat | Pusher WebSocket (no auth, dynamic config) | ✅ tested live |
 | OAuth 2.1 login (PKCE, refresh, revoke) | `id.kick.com` | ✅ |
 | Send message (as user / bot, replies) | `POST /public/v1/chat` | ✅ |
 | Delete message | `DELETE /public/v1/chat/{id}` | ✅ |
@@ -86,10 +86,10 @@ await api.sendMessage(
 
 ## Disclaimer
 
-Unofficial project, not affiliated with Kick.com. The chatroom-lookup and Pusher endpoints are internal/undocumented and may break without notice; the official API is used wherever it exists.
+Unofficial project, not affiliated with Kick.com. The chatroom-lookup, realtime-config and Pusher endpoints are internal/undocumented and may break without notice; the official API is used wherever it exists.
 
 ## License
 
 [GNU AGPL-3.0](LICENSE) — chosen for compatibility with Chatsen (AGPLv3), whose UI code will be ported here.
 
-Credits: [Chatsen](https://github.com/chatsen/chatsen) for the original client architecture.
+Credits: [Chatsen](https://github.com/chatsen/chatsen) for the original client architecture; the Kounex/obs_blade project for documenting the 2026 realtime-config flow.
