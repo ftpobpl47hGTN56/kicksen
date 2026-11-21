@@ -312,7 +312,9 @@ class KickChatClient {
     _closed = false;
     _emitStatus(KickChatStatus.resolving);
     _ids = await resolveChannelIds(channel);
+    if (_closed) return;
     _config = await fetchRealtimeConfig(_ids!.channelId);
+    if (_closed) return;
     await _openSocket();
   }
 
@@ -357,6 +359,10 @@ class KickChatClient {
       final ws = WebSocketChannel.connect(Uri.parse(config.url));
       _ws = ws;
       await ws.ready;
+      if (_closed) {
+        await ws.sink.close();
+        return;
+      }
       _wsSub = ws.stream.listen(_onFrame, onDone: _onDone, onError: (_) => _onDone());
       // Server activity_timeout is 120 s; ping well within it.
       _keepalive = Timer.periodic(const Duration(seconds: 30), (_) {

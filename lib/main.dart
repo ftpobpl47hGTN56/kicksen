@@ -4,9 +4,10 @@ import 'dart:io';
 
 import 'package:kick_chat/kick_api.dart';
 import 'package:kick_chat/kick_auth_dialog.dart';
+import 'package:kick_chat/kick_channel_session.dart';
 import 'package:kick_chat/kick_chat.dart';
-import 'package:kick_chat/kick_emotes.dart';
 import 'package:kick_chat/kick_emote_picker.dart';
+import 'package:kick_chat/kick_emotes.dart';
 import 'package:kick_chat/kick_oauth.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -46,6 +47,22 @@ class KicksenApp extends StatelessWidget {
   }
 }
 
+String _statusLabel(KickChatStatus status) => switch (status) {
+      KickChatStatus.resolving => 'Поиск канала',
+      KickChatStatus.connecting => 'Подключение',
+      KickChatStatus.connected => 'В эфире',
+      KickChatStatus.reconnecting => 'Переподключение',
+      KickChatStatus.disconnected => 'Отключено',
+    };
+
+Color _statusColor(KickChatStatus status) => switch (status) {
+      KickChatStatus.connected => KicksenApp.kickGreen,
+      KickChatStatus.resolving ||
+      KickChatStatus.connecting ||
+      KickChatStatus.reconnecting => const Color(0xFFFFC107),
+      KickChatStatus.disconnected => const Color(0xFF768077),
+    };
+
 class ChatPage extends StatefulWidget {
   const ChatPage({super.key});
 
@@ -56,35 +73,21 @@ class ChatPage extends StatefulWidget {
 class _ChatPageState extends State<ChatPage> {
   static const _maxMessages = 400;
 
-  final _channelController = TextEditingController(text: 'xqc');
-  final _composerController = TextEditingController();
-  final _scrollController = ScrollController();
+  final _channelController = TextEditingController(text: 'tapiviao');
   final _emoteRepository = KickEmoteRepository();
-  final _messages = <KickChatMessage>[];
-  var _emotes = <String, KickEmote>{};
+  final _sessions = <KickChannelSession>[];
 
-  KickChatClient? _client;
   KickToken? _token;
   KickOAuth? _oauth;
   KickApiClient? _api;
   KickUser? _user;
-  StreamSubscription<KickChatMessage>? _messageSubscription;
-  StreamSubscription<KickChatStatus>? _statusSubscription;
 
-  KickChatStatus _status = KickChatStatus.disconnected;
-  String _channel = '';
-  String? _error;
-  int _generation = 0;
-  bool _scrollScheduled = false;
+  var _selectedIndex = 0;
+  String? _homeError;
   bool _authBusy = false;
-  bool _sending = false;
 
-  bool get _isConnecting =>
-      _status == KickChatStatus.resolving ||
-      _status == KickChatStatus.connecting ||
-      _status == KickChatStatus.reconnecting;
-
-  bool get _isConnected => _status == KickChatStatus.connected;
+  KickChannelSession? get _activeSession =>
+      _selectedIndex == 0 ? null : _sessions[_selectedIndex - 1];
 
   @override
   void initState() {
@@ -94,15 +97,11 @@ class _ChatPageState extends State<ChatPage> {
 
   @override
   void dispose() {
-    _generation++;
     _channelController.dispose();
-    _composerController.dispose();
-    _scrollController.dispose();
     _emoteRepository.dispose();
-    unawaited(_messageSubscription?.cancel());
-    unawaited(_statusSubscription?.cancel());
-    final client = _client;
-    if (client != null) unawaited(client.dispose());
+    for (final session in _sessions) {
+      unawaited(session.dispose());
+    }
     super.dispose();
   }
 
@@ -218,34 +217,36 @@ class _ChatPageState extends State<ChatPage> {
     return _api;
   }
 
-  Future<void> _sendMessage() async {
-    final content = _composerController.text.trim();
-    if (content.isEmpty || _sending) return;
-    if (!_isConnected) {
+  Future<void> _sendMessage(KickChannelSession session) async {
+    final content = session.composerController.text.trim();
+    if (content.isEmpty || session.sending) return;
+    if (!session.isConnected) {
       _showMessage('Сначала подключитесь к каналу.');
       return;
     }
 
-    setState(() => _sending = true);
+    setState(() => session.sending = true);
     try {
       final api = await _validApi();
       if (api == null) {
         _showMessage('Сначала войдите через Kick.');
         return;
       }
-      final target = await api.getChannelBySlug(_channel);
+      final target = await api.getChannelBySlug(session.channel);
       if (target == null) {
-        throw KickApiException('Канал $_channel не найден.');
+        throw KickApiException('Канал ${session.channel} не найден.');
       }
       await api.sendMessage(
         broadcasterUserId: target.broadcasterUserId,
         content: content,
       );
-      _composerController.clear();
+      session.composerController.clear();
     } catch (error) {
       _showMessage('Сообщение не отправлено: $error');
     } finally {
-      if (mounted) setState(() => _sending = false);
+      if (mounted && _sessions.contains(session)) {
+        setState(() => session.sending = false);
+      }
     }
   }
 
@@ -256,107 +257,145 @@ class _ChatPageState extends State<ChatPage> {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
-  Future<void> _connect() async {
+  void _openChannel() {
     final channel = _normalizeChannel(_channelController.text);
     if (channel.isEmpty) {
-      setState(() => _error = 'Введите название канала или ссылку на него.');
+      setState(() => _homeError = 'Введите название канала или ссылку на него.');
       return;
     }
 
-    FocusScope.of(context).unfocus();
-    final generation = ++_generation;
-    await _closeClient();
-    if (!mounted || generation != _generation) return;
+    final existingIndex = _sessions.indexWhere(
+      (session) => session.channel.toLowerCase() == channel.toLowerCase(),
+    );
+    if (existingIndex >= 0) {
+      _selectSession(existingIndex);
+      return;
+    }
 
+    final session = KickChannelSession(channel);
     setState(() {
-      _channel = channel;
-      _messages.clear();
-      _emotes = {};
-      _error = null;
-      _status = KickChatStatus.resolving;
+      _sessions.add(session);
+      _selectedIndex = _sessions.length;
+      _homeError = null;
+    });
+    _bindSession(session);
+    unawaited(_connectSession(session));
+  }
+
+  void _bindSession(KickChannelSession session) {
+    session.statusSubscription = session.client.status.listen((status) {
+      if (!mounted || !_sessions.contains(session)) return;
+      setState(() => session.status = status);
     });
 
-    final client = KickChatClient();
-    _client = client;
-
-    _statusSubscription = client.status.listen((status) {
-      if (!mounted || generation != _generation) return;
-      setState(() => _status = status);
-    });
-
-    _messageSubscription = client.messages.listen((message) {
-      if (!mounted || generation != _generation) return;
-
-      final followLatest = !_scrollController.hasClients ||
-          _scrollController.position.pixels >=
-              _scrollController.position.maxScrollExtent - 96;
+    session.messageSubscription = session.client.messages.listen((message) {
+      if (!mounted || !_sessions.contains(session)) return;
+      final followLatest = !session.scrollController.hasClients ||
+          session.scrollController.position.pixels >=
+              session.scrollController.position.maxScrollExtent - 96;
 
       setState(() {
-        _messages.add(message);
-        if (_messages.length > _maxMessages) {
-          _messages.removeRange(0, _messages.length - _maxMessages);
+        session.messages.add(message);
+        if (session.messages.length > _maxMessages) {
+          session.messages.removeRange(0, session.messages.length - _maxMessages);
         }
+        if (!identical(_activeSession, session)) session.unread++;
       });
 
-      if (followLatest) _scheduleScrollToLatest();
+      if (followLatest) _scheduleScrollToLatest(session);
+    });
+  }
+
+  Future<void> _connectSession(KickChannelSession session) async {
+    if (session.isConnecting || !_sessions.contains(session)) return;
+    final generation = ++session.generation;
+    setState(() {
+      session.error = null;
+      session.status = KickChatStatus.resolving;
     });
 
     try {
-      await client.connect(channel);
-      unawaited(_loadEmotes(client, generation));
+      await session.client.connect(session.channel);
+      if (!mounted || !_sessions.contains(session) || generation != session.generation) {
+        return;
+      }
+      unawaited(_loadEmotes(session, generation));
     } catch (error) {
-      if (!mounted || generation != _generation) return;
+      if (!mounted || !_sessions.contains(session) || generation != session.generation) {
+        return;
+      }
       setState(() {
-        _status = KickChatStatus.disconnected;
-        _error = error.toString();
+        session.status = KickChatStatus.disconnected;
+        session.error = error.toString();
       });
-      await client.dispose();
-      if (generation == _generation) _client = null;
     }
   }
 
-  Future<void> _loadEmotes(KickChatClient client, int generation) async {
-    final kickUserId = client.channelIds?.userId;
+  Future<void> _loadEmotes(KickChannelSession session, int generation) async {
+    final kickUserId = session.client.channelIds?.userId;
     final global = await _emoteRepository.globalEmotes();
     final channel = kickUserId == null
         ? const <KickEmote>[]
         : await _emoteRepository.channelEmotes(kickUserId);
-    if (!mounted || generation != _generation) return;
+    if (!mounted || !_sessions.contains(session) || generation != session.generation) {
+      return;
+    }
     setState(() {
-      _emotes = {
+      session.emotes = {
         for (final emote in [...global, ...channel]) emote.name: emote,
       };
     });
   }
 
-  Future<void> _disconnect() async {
-    _generation++;
-    await _closeClient();
-    if (!mounted) return;
+  Future<void> _disconnectSession(KickChannelSession session) async {
+    session.generation++;
+    await session.client.disconnect();
+    if (!mounted || !_sessions.contains(session)) return;
     setState(() {
-      _status = KickChatStatus.disconnected;
-      _error = null;
+      session.status = KickChatStatus.disconnected;
+      session.error = null;
     });
   }
 
-  Future<void> _closeClient() async {
-    await _messageSubscription?.cancel();
-    await _statusSubscription?.cancel();
-    _messageSubscription = null;
-    _statusSubscription = null;
-
-    final client = _client;
-    _client = null;
-    if (client != null) await client.dispose();
+  void _selectHome() {
+    setState(() => _selectedIndex = 0);
   }
 
-  void _scheduleScrollToLatest() {
-    if (_scrollScheduled) return;
-    _scrollScheduled = true;
+  void _selectSession(int index) {
+    setState(() {
+      _selectedIndex = index + 1;
+      _sessions[index].unread = 0;
+      _homeError = null;
+    });
+    _scheduleScrollToLatest(_sessions[index]);
+  }
+
+  void _closeSession(KickChannelSession session) {
+    final index = _sessions.indexOf(session);
+    if (index < 0) return;
+
+    setState(() {
+      _sessions.removeAt(index);
+      if (_selectedIndex > index + 1) {
+        _selectedIndex--;
+      } else if (_selectedIndex == index + 1) {
+        _selectedIndex = index == 0 ? 0 : index;
+      }
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _scrollScheduled = false;
-      if (!mounted || !_scrollController.hasClients) return;
-      _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      unawaited(session.dispose());
+    });
+  }
+
+  void _scheduleScrollToLatest(KickChannelSession session) {
+    if (session.scrollScheduled) return;
+    session.scrollScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      session.scrollScheduled = false;
+      if (!mounted || !_sessions.contains(session) || !session.scrollController.hasClients) {
+        return;
+      }
+      session.scrollController.jumpTo(session.scrollController.position.maxScrollExtent);
     });
   }
 
@@ -374,21 +413,32 @@ class _ChatPageState extends State<ChatPage> {
     return value.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '');
   }
 
-  String get _statusLabel => switch (_status) {
-        KickChatStatus.resolving => 'Поиск канала',
-        KickChatStatus.connecting => 'Подключение',
-        KickChatStatus.connected => 'В эфире',
-        KickChatStatus.reconnecting => 'Переподключение',
-        KickChatStatus.disconnected => 'Отключено',
-      };
-
   @override
   Widget build(BuildContext context) {
+    final active = _activeSession;
     return Scaffold(
       appBar: AppBar(
-        title: const Text(
-          'Kicksen',
-          style: TextStyle(fontWeight: FontWeight.w700),
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Kicksen',
+              style: TextStyle(fontWeight: FontWeight.w700),
+            ),
+            if (active != null) ...[
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 10),
+                child: Text('/', style: TextStyle(color: Color(0xFF768077))),
+              ),
+              Flexible(
+                child: Text(
+                  active.channel,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w500),
+                ),
+              ),
+            ],
+          ],
         ),
         actions: [
           if (_user != null)
@@ -407,53 +457,448 @@ class _ChatPageState extends State<ChatPage> {
           ),
           Padding(
             padding: const EdgeInsets.only(right: 16),
-            child: Center(child: _StatusBadge(label: _statusLabel)),
+            child: Center(
+              child: _StatusBadge(
+                label: active == null
+                    ? 'Каналы: ${_sessions.length}'
+                    : _statusLabel(active.status),
+              ),
+            ),
           ),
         ],
       ),
       body: SafeArea(
         top: false,
-        child: Column(
+        child: IndexedStack(
+          index: _selectedIndex,
           children: [
-            _ChannelBar(
+            _HomeView(
               controller: _channelController,
-              isConnecting: _isConnecting,
-              isConnected: _isConnected,
-              onConnect: _connect,
-              onDisconnect: _disconnect,
+              error: _homeError,
+              sessions: _sessions,
+              onOpen: _openChannel,
+              onSelect: _selectSession,
+              onClose: _closeSession,
             ),
-            if (_error != null) _ErrorBanner(message: _error!),
-            Expanded(child: _buildChat()),
-            _Composer(
-              controller: _composerController,
-              signedIn: _user != null,
-              connected: _isConnected,
-              sending: _sending,
-              emotes: _emotes,
-              onSend: _sendMessage,
-            ),
+            for (final session in _sessions)
+              _ChannelView(
+                key: ValueKey(session),
+                session: session,
+                signedIn: _user != null,
+                onSend: () => _sendMessage(session),
+                onConnect: () => unawaited(_connectSession(session)),
+                onDisconnect: () => unawaited(_disconnectSession(session)),
+              ),
           ],
+        ),
+      ),
+      bottomNavigationBar: _ChannelTabs(
+        sessions: _sessions,
+        selectedIndex: _selectedIndex,
+        onHome: _selectHome,
+        onSelect: _selectSession,
+        onClose: _closeSession,
+      ),
+    );
+  }
+}
+
+class _HomeView extends StatelessWidget {
+  const _HomeView({
+    required this.controller,
+    required this.error,
+    required this.sessions,
+    required this.onOpen,
+    required this.onSelect,
+    required this.onClose,
+  });
+
+  final TextEditingController controller;
+  final String? error;
+  final List<KickChannelSession> sessions;
+  final VoidCallback onOpen;
+  final ValueChanged<int> onSelect;
+  final ValueChanged<KickChannelSession> onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.all(24),
+      children: [
+        Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 720),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const SizedBox(height: 16),
+                const Text(
+                  'Каналы Kick',
+                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Добавьте канал — его чат откроется в отдельной вкладке.',
+                  style: TextStyle(color: Color(0xFF9AA69B), height: 1.4),
+                ),
+                const SizedBox(height: 20),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final field = TextField(
+                      controller: controller,
+                      textInputAction: TextInputAction.go,
+                      onSubmitted: (_) => onOpen(),
+                      decoration: const InputDecoration(
+                        labelText: 'Канал Kick',
+                        hintText: 'xqc или https://kick.com/xqc',
+                        prefixIcon: Icon(Icons.tag),
+                      ),
+                    );
+                    final button = FilledButton.icon(
+                      onPressed: onOpen,
+                      icon: const Icon(Icons.add),
+                      label: const Text('Добавить канал'),
+                    );
+                    if (constraints.maxWidth < 560) {
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          field,
+                          const SizedBox(height: 12),
+                          SizedBox(height: 48, child: button),
+                        ],
+                      );
+                    }
+                    return Row(
+                      children: [
+                        Expanded(child: field),
+                        const SizedBox(width: 12),
+                        SizedBox(height: 48, child: button),
+                      ],
+                    );
+                  },
+                ),
+                if (error != null) ...[
+                  const SizedBox(height: 12),
+                  Text(error!, style: const TextStyle(color: Color(0xFFFFB4AB))),
+                ],
+                const SizedBox(height: 28),
+                if (sessions.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 40),
+                    child: Center(
+                      child: Icon(Icons.forum_outlined, size: 48, color: KicksenApp.kickGreen),
+                    ),
+                  )
+                else ...[
+                  const Text(
+                    'Открытые каналы',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 8),
+                  for (var index = 0; index < sessions.length; index++)
+                    Card(
+                      margin: const EdgeInsets.symmetric(vertical: 4),
+                      color: const Color(0xFF151C16),
+                      child: ListTile(
+                        onTap: () => onSelect(index),
+                        leading: CircleAvatar(
+                          radius: 5,
+                          backgroundColor: _statusColor(sessions[index].status),
+                        ),
+                        title: Text(sessions[index].channel),
+                        subtitle: Text(_statusLabel(sessions[index].status)),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (sessions[index].unread > 0)
+                              Padding(
+                                padding: const EdgeInsets.only(right: 8),
+                                child: _UnreadBadge(count: sessions[index].unread),
+                              ),
+                            IconButton(
+                              onPressed: () => onClose(sessions[index]),
+                              tooltip: 'Закрыть канал',
+                              icon: const Icon(Icons.close),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ChannelView extends StatelessWidget {
+  const _ChannelView({
+    super.key,
+    required this.session,
+    required this.signedIn,
+    required this.onSend,
+    required this.onConnect,
+    required this.onDisconnect,
+  });
+
+  final KickChannelSession session;
+  final bool signedIn;
+  final VoidCallback onSend;
+  final VoidCallback onConnect;
+  final VoidCallback onDisconnect;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Material(
+          color: const Color(0xFF111712),
+          child: SizedBox(
+            height: 44,
+            child: Row(
+              children: [
+                const SizedBox(width: 16),
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: _statusColor(session.status),
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Text(_statusLabel(session.status)),
+                const Spacer(),
+                TextButton.icon(
+                  onPressed: session.isConnecting || session.isConnected
+                      ? onDisconnect
+                      : onConnect,
+                  icon: Icon(
+                    session.isConnecting || session.isConnected
+                        ? Icons.stop
+                        : Icons.refresh,
+                    size: 18,
+                  ),
+                  label: Text(
+                    session.isConnecting || session.isConnected
+                        ? 'Отключиться'
+                        : 'Подключиться',
+                  ),
+                ),
+                const SizedBox(width: 8),
+              ],
+            ),
+          ),
+        ),
+        if (session.error != null) _ErrorBanner(message: session.error!),
+        Expanded(child: _ChatMessages(session: session)),
+        _Composer(
+          controller: session.composerController,
+          signedIn: signedIn,
+          connected: session.isConnected,
+          sending: session.sending,
+          emotes: session.emotes,
+          onSend: onSend,
+        ),
+      ],
+    );
+  }
+}
+
+class _ChatMessages extends StatelessWidget {
+  const _ChatMessages({required this.session});
+
+  final KickChannelSession session;
+
+  @override
+  Widget build(BuildContext context) {
+    if (session.messages.isEmpty) {
+      return _EmptyChat(session: session);
+    }
+
+    return ListView.separated(
+      controller: session.scrollController,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      itemCount: session.messages.length,
+      separatorBuilder: (_, _) => const SizedBox(height: 7),
+      itemBuilder: (context, index) => _MessageRow(
+        message: session.messages[index],
+        thirdPartyEmotes: session.emotes,
+      ),
+    );
+  }
+}
+
+class _ChannelTabs extends StatelessWidget {
+  const _ChannelTabs({
+    required this.sessions,
+    required this.selectedIndex,
+    required this.onHome,
+    required this.onSelect,
+    required this.onClose,
+  });
+
+  final List<KickChannelSession> sessions;
+  final int selectedIndex;
+  final VoidCallback onHome;
+  final ValueChanged<int> onSelect;
+  final ValueChanged<KickChannelSession> onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: const Color(0xFF111712),
+      child: SafeArea(
+        top: false,
+        child: SizedBox(
+          height: 56,
+          child: Row(
+            children: [
+              _HomeTab(selected: selectedIndex == 0, onTap: onHome),
+              const VerticalDivider(width: 1, color: Color(0xFF263027)),
+              Expanded(
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      for (var index = 0; index < sessions.length; index++)
+                        _ChannelTab(
+                          session: sessions[index],
+                          selected: selectedIndex == index + 1,
+                          onTap: () => onSelect(index),
+                          onClose: () => onClose(sessions[index]),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              IconButton(
+                onPressed: onHome,
+                tooltip: 'Добавить канал',
+                icon: const Icon(Icons.add),
+              ),
+              const SizedBox(width: 4),
+            ],
+          ),
         ),
       ),
     );
   }
+}
 
-  Widget _buildChat() {
-    if (_messages.isEmpty) {
-      return _EmptyChat(
-        status: _status,
-        channel: _channel,
-      );
-    }
+class _HomeTab extends StatelessWidget {
+  const _HomeTab({required this.selected, required this.onTap});
 
-    return ListView.separated(
-      controller: _scrollController,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      itemCount: _messages.length,
-      separatorBuilder: (_, _) => const SizedBox(height: 7),
-      itemBuilder: (context, index) => _MessageRow(
-        message: _messages[index],
-        thirdPartyEmotes: _emotes,
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: SizedBox(
+        width: 56,
+        height: 56,
+        child: Icon(
+          Icons.home_outlined,
+          color: selected ? KicksenApp.kickGreen : const Color(0xFF9AA69B),
+        ),
+      ),
+    );
+  }
+}
+
+class _ChannelTab extends StatelessWidget {
+  const _ChannelTab({
+    required this.session,
+    required this.selected,
+    required this.onTap,
+    required this.onClose,
+  });
+
+  final KickChannelSession session;
+  final bool selected;
+  final VoidCallback onTap;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: selected ? const Color(0xFF203222) : null,
+      child: InkWell(
+        onTap: onTap,
+        child: Container(
+          width: 190,
+          height: 56,
+          padding: const EdgeInsets.only(left: 12),
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(
+                color: selected ? KicksenApp.kickGreen : const Color(0xFF263027),
+                width: 2,
+              ),
+            ),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 7,
+                height: 7,
+                decoration: BoxDecoration(
+                  color: _statusColor(session.status),
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  session.channel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (session.unread > 0) ...[
+                _UnreadBadge(count: session.unread),
+                const SizedBox(width: 4),
+              ],
+              IconButton(
+                onPressed: onClose,
+                tooltip: 'Закрыть ${session.channel}',
+                iconSize: 17,
+                icon: const Icon(Icons.close),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _UnreadBadge extends StatelessWidget {
+  const _UnreadBadge({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: KicksenApp.kickGreen,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Text(
+        count > 99 ? '99+' : '$count',
+        style: const TextStyle(
+          color: Color(0xFF0D110E),
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+        ),
       ),
     );
   }
@@ -652,82 +1097,6 @@ class _ComposerState extends State<_Composer> {
   }
 }
 
-class _ChannelBar extends StatelessWidget {
-  const _ChannelBar({
-    required this.controller,
-    required this.isConnecting,
-    required this.isConnected,
-    required this.onConnect,
-    required this.onDisconnect,
-  });
-
-  final TextEditingController controller;
-  final bool isConnecting;
-  final bool isConnected;
-  final VoidCallback onConnect;
-  final VoidCallback onDisconnect;
-
-  @override
-  Widget build(BuildContext context) {
-    final field = TextField(
-      controller: controller,
-      enabled: !isConnecting,
-      textInputAction: TextInputAction.go,
-      onSubmitted: isConnecting ? null : (_) => onConnect(),
-      decoration: const InputDecoration(
-        labelText: 'Канал Kick',
-        hintText: 'xqc или https://kick.com/xqc',
-        prefixIcon: Icon(Icons.tag),
-      ),
-    );
-
-    final button = FilledButton.icon(
-      onPressed: isConnecting || isConnected ? onDisconnect : onConnect,
-      icon: isConnecting
-          ? const SizedBox.square(
-              dimension: 18,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          : Icon(isConnected ? Icons.stop : Icons.play_arrow),
-      label: Text(
-        isConnecting
-            ? 'Отмена'
-            : isConnected
-                ? 'Отключиться'
-                : 'Подключиться',
-      ),
-    );
-
-    return Material(
-      color: const Color(0xFF111712),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            if (constraints.maxWidth < 560) {
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  field,
-                  const SizedBox(height: 12),
-                  SizedBox(height: 48, child: button),
-                ],
-              );
-            }
-            return Row(
-              children: [
-                Expanded(child: field),
-                const SizedBox(width: 12),
-                SizedBox(height: 48, child: button),
-              ],
-            );
-          },
-        ),
-      ),
-    );
-  }
-}
-
 class _StatusBadge extends StatelessWidget {
   const _StatusBadge({required this.label});
 
@@ -766,17 +1135,14 @@ class _ErrorBanner extends StatelessWidget {
 }
 
 class _EmptyChat extends StatelessWidget {
-  const _EmptyChat({required this.status, required this.channel});
+  const _EmptyChat({required this.session});
 
-  final KickChatStatus status;
-  final String channel;
+  final KickChannelSession session;
 
   @override
   Widget build(BuildContext context) {
-    final isLoading = status == KickChatStatus.resolving ||
-        status == KickChatStatus.connecting ||
-        status == KickChatStatus.reconnecting;
-    final isLive = status == KickChatStatus.connected;
+    final isLoading = session.isConnecting;
+    final isLive = session.isConnected;
 
     return Center(
       child: Padding(
@@ -795,10 +1161,10 @@ class _EmptyChat extends StatelessWidget {
             const SizedBox(height: 16),
             Text(
               isLoading
-                  ? 'Подключаемся к $channel…'
+                  ? 'Подключаемся к ${session.channel}…'
                   : isLive
-                      ? 'Чат $channel подключён. Ожидаем сообщения…'
-                      : 'Введите канал и подключитесь к живому чату.',
+                      ? 'Чат ${session.channel} подключён. Ожидаем сообщения…'
+                      : 'Канал ${session.channel} отключён.',
               textAlign: TextAlign.center,
               style: const TextStyle(fontSize: 16, height: 1.5),
             ),

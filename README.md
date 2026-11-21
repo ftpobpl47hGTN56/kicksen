@@ -5,7 +5,7 @@ Cross-platform **Kick** chat client — a Chatsen-style app for [Kick.com](https
 ## Status
 
 - Live Kick chat over the public Pusher WebSocket, without authentication.
-- Flutter screen: channel selection, connection status, live messages, replies, badges and Kick emotes.
+- Flutter screen: Chatsen-style channel tabs, independent live chats, unread counters, replies, badges and Kick emotes.
 - 7TV global/channel emotes, BetterTTV global emotes and prefix autocomplete in the message composer.
 - OAuth 2.1 (PKCE) login and sending through the official Kick API are available in the core, CLI example and Windows app.
 - The Flutter app restores the gitignored `.kick_token.json` session when possible; the client secret itself is never persisted.
@@ -20,7 +20,7 @@ flutter pub get
 flutter run -d windows
 ```
 
-Enter a channel slug such as `xqc`, or paste a full `https://kick.com/xqc` link, and press **Подключиться**. No login is required to read chat.
+On the home tab, enter a channel slug such as `xqc`, or paste a full `https://kick.com/xqc` link, and press **Добавить канал**. Each channel keeps its own connection, messages, composer and emote set while you switch tabs. No login is required to read chat.
 
 To send messages, press **Войти**, enter your Kick application's Client ID and Client Secret, and approve access in the browser. The app listens on localhost and completes the login automatically; no callback URL copying is needed. Once connected and signed in, type in the bottom field and press Enter. Typing at least two characters of a loaded 7TV/BTTV emote name opens autocomplete; select an item to insert its code. The client secret stays in memory; only the token cache is written to `.kick_token.json`, which remains gitignored.
 
@@ -74,7 +74,7 @@ Never commit OAuth client secrets or `.kick_token.json`.
 | 7TV global + Kick channel emotes | 7TV v3 API | Implemented |
 | BTTV global emotes | BetterTTV public API | Implemented |
 | Emote autocomplete | Flutter composer | Implemented |
-| Multi-channel tabs | — | Planned |
+| Multi-channel tabs | Independent sessions, unread counters | Implemented |
 
 ## Disclaimer
 
