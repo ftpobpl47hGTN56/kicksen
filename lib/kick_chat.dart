@@ -163,6 +163,9 @@ class KickChatClient {
   KickChannelIds? _ids;
   KickPusherConfig? _config;
 
+  /// Resolved IDs for the current channel, available after [connect] starts.
+  KickChannelIds? get channelIds => _ids;
+
   static final _random = Random.secure();
 
   // ---------------------------------------------------------------------------
