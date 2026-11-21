@@ -1,3 +1,4 @@
+import 'package:kick_chat/kick_emote_image.dart';
 import 'package:kick_chat/kick_emotes.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -68,10 +69,8 @@ class _KickEmotePickerDialogState extends State<_KickEmotePickerDialog> {
                             child: Column(
                               children: [
                                 Expanded(
-                                  child: Image.network(
-                                    emote.imageUrl,
-                                    fit: BoxFit.contain,
-                                    errorBuilder: (_, _, _) => const Icon(Icons.image_not_supported),
+                                  child: Center(
+                                    child: KickEmoteImage(url: emote.imageUrl),
                                   ),
                                 ),
                                 const SizedBox(height: 6),
