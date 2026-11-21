@@ -316,11 +316,11 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Future<void> _loadEmotes(KickChatClient client, int generation) async {
-    final channelId = client.channelIds?.channelId;
+    final kickUserId = client.channelIds?.userId;
     final global = await _emoteRepository.globalEmotes();
-    final channel = channelId == null
+    final channel = kickUserId == null
         ? const <KickEmote>[]
-        : await _emoteRepository.channelEmotes(channelId);
+        : await _emoteRepository.channelEmotes(kickUserId);
     if (!mounted || generation != _generation) return;
     setState(() {
       _emotes = {

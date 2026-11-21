@@ -80,13 +80,29 @@ class KickEmoteRepository {
   }
 
   Future<dynamic> _getJson(String url) async {
-    final response = await _http
-        .get(Uri.parse(url), headers: {'Accept': 'application/json'})
-        .timeout(const Duration(seconds: 15));
-    if (response.statusCode != 200) {
-      throw StateError('Emote request failed: ${response.statusCode}');
+    Object? lastError;
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        final response = await _http
+            .get(
+              Uri.parse(url),
+              headers: {
+                'Accept': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+              },
+            )
+            .timeout(const Duration(seconds: 15));
+        if (response.statusCode != 200) {
+          throw StateError('Emote request failed: ${response.statusCode}');
+        }
+        return jsonDecode(utf8.decode(response.bodyBytes));
+      } catch (error) {
+        lastError = error;
+        if (attempt == 0) await Future.delayed(const Duration(seconds: 1));
+      }
     }
-    return jsonDecode(utf8.decode(response.bodyBytes));
+    throw lastError ?? StateError('Emote request failed');
   }
 
   List<KickEmote> _parse7TvEmotes(List<dynamic> items) {

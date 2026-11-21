@@ -55,9 +55,17 @@ class KickPusherConfig {
 
 /// IDs of a Kick channel, resolved from its slug.
 class KickChannelIds {
-  const KickChannelIds({required this.channelId, required this.chatroomId});
+  const KickChannelIds({
+    required this.channelId,
+    required this.chatroomId,
+    this.userId,
+  });
+
   final int channelId;
   final int chatroomId;
+
+  /// Kick user ID used by third-party services such as 7TV.
+  final int? userId;
 }
 
 enum KickChatStatus { resolving, connecting, connected, reconnecting, disconnected }
@@ -233,9 +241,14 @@ class KickChatClient {
     try {
       final data = jsonDecode(body) as Map<String, dynamic>;
       final channelId = data['id'];
+      final userId = data['user_id'];
       final chatroomId = (data['chatroom'] as Map<String, dynamic>?)?['id'];
       if (channelId is int && chatroomId is int) {
-        return KickChannelIds(channelId: channelId, chatroomId: chatroomId);
+        return KickChannelIds(
+          channelId: channelId,
+          chatroomId: chatroomId,
+          userId: userId is int ? userId : null,
+        );
       }
     } catch (_) {}
     return null;
@@ -305,9 +318,17 @@ class KickChatClient {
 
   /// Starts listening with known IDs (skips the REST lookups, uses the
   /// fallback Pusher config).
-  Future<void> connectByIds({required int channelId, required int chatroomId}) async {
+  Future<void> connectByIds({
+    required int channelId,
+    required int chatroomId,
+    int? userId,
+  }) async {
     _closed = false;
-    _ids = KickChannelIds(channelId: channelId, chatroomId: chatroomId);
+    _ids = KickChannelIds(
+      channelId: channelId,
+      chatroomId: chatroomId,
+      userId: userId,
+    );
     _config = KickPusherConfig.fallback;
     await _openSocket();
   }
