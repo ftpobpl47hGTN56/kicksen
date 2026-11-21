@@ -6,6 +6,7 @@ import 'package:kick_chat/kick_api.dart';
 import 'package:kick_chat/kick_auth_dialog.dart';
 import 'package:kick_chat/kick_chat.dart';
 import 'package:kick_chat/kick_emotes.dart';
+import 'package:kick_chat/kick_emote_picker.dart';
 import 'package:kick_chat/kick_oauth.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -533,6 +534,33 @@ class _ComposerState extends State<_Composer> {
     setState(() => _suggestions = []);
   }
 
+  Future<void> _openEmotePicker() async {
+    final emote = await showKickEmotePicker(
+      context: context,
+      emotes: widget.emotes,
+    );
+    if (emote == null || !mounted) return;
+    _insertPickedEmote(emote);
+  }
+
+  void _insertPickedEmote(KickEmote emote) {
+    final value = widget.controller.value;
+    final selection = value.selection;
+    final start = selection.isValid ? selection.start : value.text.length;
+    final end = selection.isValid ? selection.end : value.text.length;
+    final before = value.text.substring(0, start);
+    final after = value.text.substring(end);
+    final leadingSpace = before.isNotEmpty && !RegExp(r'\s$').hasMatch(before) ? ' ' : '';
+    final trailingSpace = after.isEmpty || !RegExp(r'^\s').hasMatch(after) ? ' ' : '';
+    final replacement = '$leadingSpace${emote.name}$trailingSpace';
+    final updated = value.text.replaceRange(start, end, replacement);
+    widget.controller.value = TextEditingValue(
+      text: updated,
+      selection: TextSelection.collapsed(offset: start + replacement.length),
+    );
+    setState(() => _suggestions = []);
+  }
+
   void _submit() {
     setState(() => _suggestions = []);
     widget.onSend();
@@ -597,7 +625,14 @@ class _ComposerState extends State<_Composer> {
                     ),
                   ),
                 ),
-                const SizedBox(width: 8),
+                const SizedBox(width: 4),
+                IconButton(
+                  onPressed: widget.connected && widget.emotes.isNotEmpty
+                      ? _openEmotePicker
+                      : null,
+                  tooltip: 'Эмоуты',
+                  icon: const Icon(Icons.emoji_emotions_outlined),
+                ),
                 IconButton(
                   onPressed: canSend ? _submit : null,
                   tooltip: 'Отправить',
