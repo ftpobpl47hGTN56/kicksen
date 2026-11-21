@@ -380,7 +380,6 @@ class KickChatClient {
       code = (data as Map<String, dynamic>)['code'] as int? ?? 0;
     } catch (_) {}
     if (code >= 4000 && code < 4100 && _ids != null && !_closed) {
-      _config = null; // force re-resolution
       unawaited(fetchRealtimeConfig(_ids!.channelId).then((config) async {
         _config = config;
         await _teardownSocket();
@@ -451,7 +450,4 @@ class KickChatClient {
   void _emitStatus(KickChatStatus s) {
     if (!_status.isClosed) _status.add(s);
   }
-
-  /// Silence unused-import lints for unawaited futures.
-  void unawaited(Future<void> future) {}
 }
