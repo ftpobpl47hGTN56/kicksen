@@ -1,17 +1,26 @@
 name: kick_chat
 description: >-
-  Kick.com chat toolkit — reads live chat over the public Pusher WebSocket
-  (no auth), plus OAuth 2.1 (PKCE) login and sending via the official Kick API.
+  Kicksen — a Kick.com chat client with live Pusher chat, OAuth 2.1 (PKCE),
+  and sending through the official Kick API.
 version: 0.2.0
 publish_to: none
 
 environment:
-  sdk: ^3.4.0
+  sdk: ^3.14.0
 
 dependencies:
+  flutter:
+    sdk: flutter
+  material_ui: ^1.0.0
   http: ^1.2.2
   web_socket_channel: ^3.0.1
   crypto: ^3.0.3
 
 dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
   lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
