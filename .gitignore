@@ -4,6 +4,9 @@
 build/
 pubspec.lock
 
+# Local credentials — never commit tokens
+.kick_token.json
+
 # IDE
 .idea/
 .vscode/
