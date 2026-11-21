@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:kick_chat/kick_api.dart';
 import 'package:kick_chat/kick_auth_dialog.dart';
 import 'package:kick_chat/kick_chat.dart';
+import 'package:kick_chat/kick_emotes.dart';
 import 'package:kick_chat/kick_oauth.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -57,7 +58,9 @@ class _ChatPageState extends State<ChatPage> {
   final _channelController = TextEditingController(text: 'xqc');
   final _composerController = TextEditingController();
   final _scrollController = ScrollController();
+  final _emoteRepository = KickEmoteRepository();
   final _messages = <KickChatMessage>[];
+  var _emotes = <String, KickEmote>{};
 
   KickChatClient? _client;
   KickToken? _token;
@@ -94,6 +97,7 @@ class _ChatPageState extends State<ChatPage> {
     _channelController.dispose();
     _composerController.dispose();
     _scrollController.dispose();
+    _emoteRepository.dispose();
     unawaited(_messageSubscription?.cancel());
     unawaited(_statusSubscription?.cancel());
     final client = _client;
@@ -266,6 +270,7 @@ class _ChatPageState extends State<ChatPage> {
     setState(() {
       _channel = channel;
       _messages.clear();
+      _emotes = {};
       _error = null;
       _status = KickChatStatus.resolving;
     });
@@ -297,6 +302,7 @@ class _ChatPageState extends State<ChatPage> {
 
     try {
       await client.connect(channel);
+      unawaited(_loadEmotes(client, generation));
     } catch (error) {
       if (!mounted || generation != _generation) return;
       setState(() {
@@ -306,6 +312,20 @@ class _ChatPageState extends State<ChatPage> {
       await client.dispose();
       if (generation == _generation) _client = null;
     }
+  }
+
+  Future<void> _loadEmotes(KickChatClient client, int generation) async {
+    final channelId = client.channelIds?.channelId;
+    final global = await _emoteRepository.globalEmotes();
+    final channel = channelId == null
+        ? const <KickEmote>[]
+        : await _emoteRepository.channelEmotes(channelId);
+    if (!mounted || generation != _generation) return;
+    setState(() {
+      _emotes = {
+        for (final emote in [...global, ...channel]) emote.name: emote,
+      };
+    });
   }
 
   Future<void> _disconnect() async {
@@ -408,6 +428,7 @@ class _ChatPageState extends State<ChatPage> {
               signedIn: _user != null,
               connected: _isConnected,
               sending: _sending,
+              emotes: _emotes,
               onSend: _sendMessage,
             ),
           ],
@@ -429,17 +450,21 @@ class _ChatPageState extends State<ChatPage> {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       itemCount: _messages.length,
       separatorBuilder: (_, _) => const SizedBox(height: 7),
-      itemBuilder: (context, index) => _MessageRow(message: _messages[index]),
+      itemBuilder: (context, index) => _MessageRow(
+        message: _messages[index],
+        thirdPartyEmotes: _emotes,
+      ),
     );
   }
 }
 
-class _Composer extends StatelessWidget {
+class _Composer extends StatefulWidget {
   const _Composer({
     required this.controller,
     required this.signedIn,
     required this.connected,
     required this.sending,
+    required this.emotes,
     required this.onSend,
   });
 
@@ -447,14 +472,78 @@ class _Composer extends StatelessWidget {
   final bool signedIn;
   final bool connected;
   final bool sending;
+  final Map<String, KickEmote> emotes;
   final VoidCallback onSend;
 
   @override
+  State<_Composer> createState() => _ComposerState();
+}
+
+class _ComposerState extends State<_Composer> {
+  var _suggestions = <KickEmote>[];
+
+  @override
+  void didUpdateWidget(covariant _Composer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.emotes != widget.emotes) _updateSuggestions();
+    if (widget.sending && !oldWidget.sending) {
+      setState(() => _suggestions = []);
+    }
+  }
+
+  void _updateSuggestions() {
+    final value = widget.controller.value;
+    final cursor = value.selection.isValid ? value.selection.baseOffset : -1;
+    if (cursor < 0 || cursor > value.text.length) {
+      setState(() => _suggestions = []);
+      return;
+    }
+
+    final match = RegExp(r'(?:^|\s)([^\s]*)$').firstMatch(
+      value.text.substring(0, cursor),
+    );
+    final prefix = match?.group(1) ?? '';
+    if (prefix.length < 2) {
+      setState(() => _suggestions = []);
+      return;
+    }
+
+    final query = prefix.toLowerCase();
+    final matches = widget.emotes.values
+        .where((emote) => emote.name.toLowerCase().startsWith(query))
+        .take(6)
+        .toList();
+    if (mounted) setState(() => _suggestions = matches);
+  }
+
+  void _insertEmote(KickEmote emote) {
+    final value = widget.controller.value;
+    if (!value.selection.isValid) return;
+    final cursor = value.selection.baseOffset;
+    final before = value.text.substring(0, cursor);
+    final match = RegExp(r'(?:^|\s)([^\s]*)$').firstMatch(before);
+    final prefix = match?.group(1) ?? '';
+    final start = cursor - prefix.length;
+    final replacement = '${emote.name} ';
+    final updated = value.text.replaceRange(start, cursor, replacement);
+    widget.controller.value = TextEditingValue(
+      text: updated,
+      selection: TextSelection.collapsed(offset: start + replacement.length),
+    );
+    setState(() => _suggestions = []);
+  }
+
+  void _submit() {
+    setState(() => _suggestions = []);
+    widget.onSend();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final canSend = signedIn && connected && !sending;
-    final hint = !signedIn
+    final canSend = widget.signedIn && widget.connected && !widget.sending;
+    final hint = !widget.signedIn
         ? 'Войдите через Kick, чтобы отправлять сообщения'
-        : !connected
+        : !widget.connected
             ? 'Сначала подключитесь к каналу'
             : 'Сообщение в чат…';
 
@@ -462,31 +551,64 @@ class _Composer extends StatelessWidget {
       color: const Color(0xFF111712),
       child: Padding(
         padding: const EdgeInsets.all(12),
-        child: Row(
+        child: Column(
           children: [
-            Expanded(
-              child: TextField(
-                controller: controller,
-                enabled: signedIn && connected,
-                maxLength: 500,
-                textInputAction: TextInputAction.send,
-                onSubmitted: canSend ? (_) => onSend() : null,
-                decoration: InputDecoration(
-                  hintText: hint,
-                  counterText: '',
+            if (_suggestions.isNotEmpty)
+              Container(
+                constraints: const BoxConstraints(maxHeight: 280),
+                margin: const EdgeInsets.only(bottom: 8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1B241C),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: _suggestions.length,
+                  itemBuilder: (context, index) {
+                    final emote = _suggestions[index];
+                    return ListTile(
+                      dense: true,
+                      onTap: () => _insertEmote(emote),
+                      leading: Image.network(
+                        emote.imageUrl,
+                        width: 32,
+                        height: 32,
+                        fit: BoxFit.contain,
+                      ),
+                      title: Text(emote.name),
+                      subtitle: Text(emote.provider),
+                    );
+                  },
                 ),
               ),
-            ),
-            const SizedBox(width: 8),
-            IconButton(
-              onPressed: canSend ? onSend : null,
-              tooltip: 'Отправить',
-              icon: sending
-                  ? const SizedBox.square(
-                      dimension: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.send),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: widget.controller,
+                    enabled: widget.signedIn && widget.connected,
+                    maxLength: 500,
+                    textInputAction: TextInputAction.send,
+                    onChanged: (_) => _updateSuggestions(),
+                    onSubmitted: canSend ? (_) => _submit() : null,
+                    decoration: InputDecoration(
+                      hintText: hint,
+                      counterText: '',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton(
+                  onPressed: canSend ? _submit : null,
+                  tooltip: 'Отправить',
+                  icon: widget.sending
+                      ? const SizedBox.square(
+                          dimension: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.send),
+                ),
+              ],
             ),
           ],
         ),
@@ -653,9 +775,10 @@ class _EmptyChat extends StatelessWidget {
 }
 
 class _MessageRow extends StatelessWidget {
-  const _MessageRow({required this.message});
+  const _MessageRow({required this.message, required this.thirdPartyEmotes});
 
   final KickChatMessage message;
+  final Map<String, KickEmote> thirdPartyEmotes;
 
   @override
   Widget build(BuildContext context) {
@@ -719,36 +842,48 @@ class _MessageRow extends StatelessWidget {
 
     for (final match in pattern.allMatches(content)) {
       if (match.start > offset) {
-        spans.add(TextSpan(text: content.substring(offset, match.start)));
+        _addTextSpans(spans, content.substring(offset, match.start));
       }
       final emoteId = match.group(1)!;
       final emoteName = match.group(2)!;
-      spans.add(
-        WidgetSpan(
-          alignment: PlaceholderAlignment.middle,
-          child: Tooltip(
-            message: emoteName,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 2),
-              child: Image.network(
-                kickEmoteUrl(emoteId),
-                width: 30,
-                height: 30,
-                fit: BoxFit.contain,
-                errorBuilder: (_, _, _) => Text(emoteName),
-              ),
-            ),
-          ),
-        ),
-      );
+      spans.add(_emoteSpan(kickEmoteUrl(emoteId), emoteName, 'Kick'));
       offset = match.end;
     }
 
-    if (offset < content.length) {
-      spans.add(TextSpan(text: content.substring(offset)));
-    }
-    if (spans.isEmpty) spans.add(TextSpan(text: content));
+    if (offset < content.length) _addTextSpans(spans, content.substring(offset));
+    if (spans.isEmpty) _addTextSpans(spans, content);
     return spans;
+  }
+
+  void _addTextSpans(List<InlineSpan> spans, String text) {
+    for (final part in text.split(RegExp(r'(\s+)'))) {
+      if (part.isEmpty) continue;
+      final emote = thirdPartyEmotes[part];
+      if (emote == null) {
+        spans.add(TextSpan(text: part));
+      } else {
+        spans.add(_emoteSpan(emote.imageUrl, emote.name, emote.provider));
+      }
+    }
+  }
+
+  WidgetSpan _emoteSpan(String url, String name, String provider) {
+    return WidgetSpan(
+      alignment: PlaceholderAlignment.middle,
+      child: Tooltip(
+        message: '$name • $provider',
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 2),
+          child: Image.network(
+            url,
+            width: 30,
+            height: 30,
+            fit: BoxFit.contain,
+            errorBuilder: (_, _, _) => Text(name),
+          ),
+        ),
+      ),
+    );
   }
 
   Color _parseColor(String? value) {

@@ -5,7 +5,8 @@ Cross-platform **Kick** chat client — a Chatsen-style app for [Kick.com](https
 ## Status
 
 - Live Kick chat over the public Pusher WebSocket, without authentication.
-- First Flutter screen: channel selection, connection status, live messages, replies, badges and Kick emotes.
+- Flutter screen: channel selection, connection status, live messages, replies, badges and Kick emotes.
+- 7TV global/channel emotes, BetterTTV global emotes and prefix autocomplete in the message composer.
 - OAuth 2.1 (PKCE) login and sending through the official Kick API are available in the core, CLI example and Windows app.
 - The Flutter app restores the gitignored `.kick_token.json` session when possible; the client secret itself is never persisted.
 
@@ -21,7 +22,7 @@ flutter run -d windows
 
 Enter a channel slug such as `xqc`, or paste a full `https://kick.com/xqc` link, and press **Подключиться**. No login is required to read chat.
 
-To send messages, press **Войти**, enter your Kick application's Client ID and Client Secret, and approve access in the browser. After Kick redirects to localhost, copy the complete callback URL into the dialog. Once connected and signed in, type in the bottom field and press Enter. The client secret stays in memory; only the token cache is written to `.kick_token.json`, which remains gitignored.
+To send messages, press **Войти**, enter your Kick application's Client ID and Client Secret, and approve access in the browser. After Kick redirects to localhost, copy the complete callback URL into the dialog. Once connected and signed in, type in the bottom field and press Enter. Typing at least two characters of a loaded 7TV/BTTV emote name opens autocomplete; select an item to insert its code. The client secret stays in memory; only the token cache is written to `.kick_token.json`, which remains gitignored.
 
 ## Quickstart: read a channel from Dart
 
@@ -70,7 +71,9 @@ Never commit OAuth client secrets or `.kick_token.json`.
 | Delete message | Official `DELETE /public/v1/chat/{id}` | Implemented |
 | Flutter live-chat screen | Flutter Windows | First version |
 | Flutter OAuth and sending controls | Official Kick API | Implemented in Windows app |
-| 7TV / BTTV emotes | Provider APIs | Planned |
+| 7TV global + Kick channel emotes | 7TV v3 API | Implemented |
+| BTTV global emotes | BetterTTV public API | Implemented |
+| Emote autocomplete | Flutter composer | Implemented |
 | Multi-channel tabs | — | Planned |
 
 ## Disclaimer
