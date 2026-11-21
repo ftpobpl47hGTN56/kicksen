@@ -541,10 +541,10 @@ class _ComposerState extends State<_Composer> {
   @override
   Widget build(BuildContext context) {
     final canSend = widget.signedIn && widget.connected && !widget.sending;
-    final hint = !widget.signedIn
-        ? 'Войдите через Kick, чтобы отправлять сообщения'
-        : !widget.connected
-            ? 'Сначала подключитесь к каналу'
+    final hint = !widget.connected
+        ? 'Сначала подключитесь к каналу'
+        : !widget.signedIn
+            ? 'Можно проверить эмоуты; для отправки нужен вход'
             : 'Сообщение в чат…';
 
     return Material(
@@ -586,7 +586,7 @@ class _ComposerState extends State<_Composer> {
                 Expanded(
                   child: TextField(
                     controller: widget.controller,
-                    enabled: widget.signedIn && widget.connected,
+                    enabled: widget.connected,
                     maxLength: 500,
                     textInputAction: TextInputAction.send,
                     onChanged: (_) => _updateSuggestions(),
