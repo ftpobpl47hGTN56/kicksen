@@ -66,11 +66,15 @@ class KickEmoteRepository {
       if (data is! List) return [];
       return [
         for (final item in data.whereType<Map<String, dynamic>>())
-          if (item['id'] is String && item['code'] is String)
+          if (item['id'] is String &&
+              item['code'] is String &&
+              item['modifier'] != true)
             KickEmote(
               name: item['code'] as String,
+              // An explicit WebP path avoids extensionless image responses and
+              // also works for both static and animated BetterTTV emotes.
               imageUrl:
-                  'https://cdn.betterttv.net/emote/${item['id']}/2x',
+                  'https://cdn.betterttv.net/emote/${item['id']}/2x.webp',
               provider: 'BTTV',
             ),
       ];
