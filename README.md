@@ -22,7 +22,7 @@ flutter run -d windows
 
 Enter a channel slug such as `xqc`, or paste a full `https://kick.com/xqc` link, and press **Подключиться**. No login is required to read chat.
 
-To send messages, press **Войти**, enter your Kick application's Client ID and Client Secret, and approve access in the browser. After Kick redirects to localhost, copy the complete callback URL into the dialog. Once connected and signed in, type in the bottom field and press Enter. Typing at least two characters of a loaded 7TV/BTTV emote name opens autocomplete; select an item to insert its code. The client secret stays in memory; only the token cache is written to `.kick_token.json`, which remains gitignored.
+To send messages, press **Войти**, enter your Kick application's Client ID and Client Secret, and approve access in the browser. The app listens on localhost and completes the login automatically; no callback URL copying is needed. Once connected and signed in, type in the bottom field and press Enter. Typing at least two characters of a loaded 7TV/BTTV emote name opens autocomplete; select an item to insert its code. The client secret stays in memory; only the token cache is written to `.kick_token.json`, which remains gitignored.
 
 ## Quickstart: read a channel from Dart
 
