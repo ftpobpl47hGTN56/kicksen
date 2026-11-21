@@ -87,11 +87,7 @@ class _KickLoginDialogState extends State<KickLoginDialog> {
       });
 
       try {
-        await Process.start(
-          'cmd',
-          ['/c', 'start', '', url.toString()],
-          runInShell: true,
-        );
+        await _launchBrowser(url);
       } catch (_) {
         if (mounted) {
           setState(() {
@@ -111,6 +107,24 @@ class _KickLoginDialogState extends State<KickLoginDialog> {
       }
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Opens the URL without passing it through a command shell.
+  ///
+  /// In particular, `cmd /c start` can treat the OAuth query separators (`&`)
+  /// as command separators, opening a truncated URL and causing a Kick 404.
+  Future<void> _launchBrowser(Uri url) async {
+    final value = url.toString();
+    if (Platform.isWindows) {
+      await Process.start('rundll32.exe', [
+        'url.dll,FileProtocolHandler',
+        value,
+      ]);
+    } else if (Platform.isMacOS) {
+      await Process.start('open', [value]);
+    } else {
+      await Process.start('xdg-open', [value]);
     }
   }
 
