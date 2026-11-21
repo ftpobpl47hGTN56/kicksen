@@ -1,6 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
+import 'package:kick_chat/kick_api.dart';
+import 'package:kick_chat/kick_auth_dialog.dart';
 import 'package:kick_chat/kick_chat.dart';
+import 'package:kick_chat/kick_oauth.dart';
 import 'package:material_ui/material_ui.dart';
 
 void main() {
@@ -50,10 +55,15 @@ class _ChatPageState extends State<ChatPage> {
   static const _maxMessages = 400;
 
   final _channelController = TextEditingController(text: 'xqc');
+  final _composerController = TextEditingController();
   final _scrollController = ScrollController();
   final _messages = <KickChatMessage>[];
 
   KickChatClient? _client;
+  KickToken? _token;
+  KickOAuth? _oauth;
+  KickApiClient? _api;
+  KickUser? _user;
   StreamSubscription<KickChatMessage>? _messageSubscription;
   StreamSubscription<KickChatStatus>? _statusSubscription;
 
@@ -62,6 +72,8 @@ class _ChatPageState extends State<ChatPage> {
   String? _error;
   int _generation = 0;
   bool _scrollScheduled = false;
+  bool _authBusy = false;
+  bool _sending = false;
 
   bool get _isConnecting =>
       _status == KickChatStatus.resolving ||
@@ -71,15 +83,172 @@ class _ChatPageState extends State<ChatPage> {
   bool get _isConnected => _status == KickChatStatus.connected;
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _restoreSession());
+  }
+
+  @override
   void dispose() {
     _generation++;
     _channelController.dispose();
+    _composerController.dispose();
     _scrollController.dispose();
     unawaited(_messageSubscription?.cancel());
     unawaited(_statusSubscription?.cancel());
     final client = _client;
     if (client != null) unawaited(client.dispose());
     super.dispose();
+  }
+
+  Future<void> _restoreSession() async {
+    final file = File('.kick_token.json');
+    if (!await file.exists()) return;
+
+    try {
+      var token = KickToken.fromJson(
+        jsonDecode(await file.readAsString()) as Map<String, dynamic>,
+      );
+      final clientId = Platform.environment['KICK_CLIENT_ID'];
+      final clientSecret = Platform.environment['KICK_CLIENT_SECRET'];
+      KickOAuth? oauth;
+      if (clientId != null && clientSecret != null) {
+        oauth = KickOAuth(
+          clientId: clientId,
+          clientSecret: clientSecret,
+          redirectUri: 'http://localhost:3000/callback',
+        );
+      }
+      if (token.isExpired) {
+        if (oauth == null || token.refreshToken.isEmpty) return;
+        token = await oauth.refresh(token);
+        await file.writeAsString(jsonEncode(token.toJson()));
+      }
+
+      final api = KickApiClient(accessToken: token.accessToken);
+      final user = await api.getCurrentUser();
+      if (!mounted) return;
+      setState(() {
+        _token = token;
+        _oauth = oauth;
+        _api = api;
+        _user = user;
+      });
+    } catch (_) {
+      // An invalid or expired cache must not prevent manual sign-in.
+    }
+  }
+
+  Future<void> _login() async {
+    final result = await showDialog<KickLoginResult>(
+      context: context,
+      builder: (_) => const KickLoginDialog(),
+    );
+    if (result == null || !mounted) return;
+
+    setState(() => _authBusy = true);
+    try {
+      final api = KickApiClient(accessToken: result.token.accessToken);
+      final user = await api.getCurrentUser();
+      await File('.kick_token.json').writeAsString(
+        jsonEncode(result.token.toJson()),
+      );
+      if (!mounted) return;
+      setState(() {
+        _token = result.token;
+        _oauth = result.oauth;
+        _api = api;
+        _user = user;
+      });
+      _showMessage('Вы вошли как ${user.name}');
+    } catch (error) {
+      _showMessage('Не удалось завершить вход: $error');
+    } finally {
+      if (mounted) setState(() => _authBusy = false);
+    }
+  }
+
+  Future<void> _signOut() async {
+    final oauth = _oauth;
+    final token = _token;
+    setState(() {
+      _token = null;
+      _oauth = null;
+      _api = null;
+      _user = null;
+    });
+
+    try {
+      if (oauth != null && token != null && token.refreshToken.isNotEmpty) {
+        await oauth.revoke(token.refreshToken);
+      }
+    } catch (_) {
+      // Local sign-out still succeeds if the revocation endpoint is unavailable.
+    }
+    try {
+      final file = File('.kick_token.json');
+      if (await file.exists()) await file.delete();
+    } catch (_) {}
+  }
+
+  Future<KickApiClient?> _validApi() async {
+    var token = _token;
+    if (token == null) return null;
+
+    if (token.isExpired) {
+      final oauth = _oauth;
+      if (oauth == null || token.refreshToken.isEmpty) {
+        setState(() {
+          _token = null;
+          _api = null;
+          _user = null;
+        });
+        return null;
+      }
+      token = await oauth.refresh(token);
+      await File('.kick_token.json').writeAsString(jsonEncode(token.toJson()));
+      _token = token;
+      _api = KickApiClient(accessToken: token.accessToken);
+    }
+    return _api;
+  }
+
+  Future<void> _sendMessage() async {
+    final content = _composerController.text.trim();
+    if (content.isEmpty || _sending) return;
+    if (!_isConnected) {
+      _showMessage('Сначала подключитесь к каналу.');
+      return;
+    }
+
+    setState(() => _sending = true);
+    try {
+      final api = await _validApi();
+      if (api == null) {
+        _showMessage('Сначала войдите через Kick.');
+        return;
+      }
+      final target = await api.getChannelBySlug(_channel);
+      if (target == null) {
+        throw KickApiException('Канал $_channel не найден.');
+      }
+      await api.sendMessage(
+        broadcasterUserId: target.broadcasterUserId,
+        content: content,
+      );
+      _composerController.clear();
+    } catch (error) {
+      _showMessage('Сообщение не отправлено: $error');
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _connect() async {
@@ -92,6 +261,7 @@ class _ChatPageState extends State<ChatPage> {
     FocusScope.of(context).unfocus();
     final generation = ++_generation;
     await _closeClient();
+    if (!mounted || generation != _generation) return;
 
     setState(() {
       _channel = channel;
@@ -200,6 +370,20 @@ class _ChatPageState extends State<ChatPage> {
           style: TextStyle(fontWeight: FontWeight.w700),
         ),
         actions: [
+          if (_user != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Center(child: Text(_user!.name)),
+            ),
+          TextButton.icon(
+            onPressed: _authBusy
+                ? null
+                : _user == null
+                    ? _login
+                    : _signOut,
+            icon: Icon(_user == null ? Icons.login : Icons.logout),
+            label: Text(_user == null ? 'Войти' : 'Выйти'),
+          ),
           Padding(
             padding: const EdgeInsets.only(right: 16),
             child: Center(child: _StatusBadge(label: _statusLabel)),
@@ -219,6 +403,13 @@ class _ChatPageState extends State<ChatPage> {
             ),
             if (_error != null) _ErrorBanner(message: _error!),
             Expanded(child: _buildChat()),
+            _Composer(
+              controller: _composerController,
+              signedIn: _user != null,
+              connected: _isConnected,
+              sending: _sending,
+              onSend: _sendMessage,
+            ),
           ],
         ),
       ),
@@ -239,6 +430,67 @@ class _ChatPageState extends State<ChatPage> {
       itemCount: _messages.length,
       separatorBuilder: (_, _) => const SizedBox(height: 7),
       itemBuilder: (context, index) => _MessageRow(message: _messages[index]),
+    );
+  }
+}
+
+class _Composer extends StatelessWidget {
+  const _Composer({
+    required this.controller,
+    required this.signedIn,
+    required this.connected,
+    required this.sending,
+    required this.onSend,
+  });
+
+  final TextEditingController controller;
+  final bool signedIn;
+  final bool connected;
+  final bool sending;
+  final VoidCallback onSend;
+
+  @override
+  Widget build(BuildContext context) {
+    final canSend = signedIn && connected && !sending;
+    final hint = !signedIn
+        ? 'Войдите через Kick, чтобы отправлять сообщения'
+        : !connected
+            ? 'Сначала подключитесь к каналу'
+            : 'Сообщение в чат…';
+
+    return Material(
+      color: const Color(0xFF111712),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: controller,
+                enabled: signedIn && connected,
+                maxLength: 500,
+                textInputAction: TextInputAction.send,
+                onSubmitted: canSend ? (_) => onSend() : null,
+                decoration: InputDecoration(
+                  hintText: hint,
+                  counterText: '',
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              onPressed: canSend ? onSend : null,
+              tooltip: 'Отправить',
+              icon: sending
+                  ? const SizedBox.square(
+                      dimension: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.send),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
