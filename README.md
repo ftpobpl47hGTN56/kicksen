@@ -66,7 +66,7 @@ await api.sendMessage(
 
 ## How reading works
 
-1. Resolves the numeric `chatroom_id` for a channel slug via `kick.com/api/v2/channels/{slug}` (internal API — the official API does not expose it).
+1. Resolves the numeric `chatroom_id` for a channel slug via `kick.com/api/v2/channels/{slug}` (internal API — the official API does not expose it). This endpoint sits behind Cloudflare: if Dart's TLS fingerprint gets blocked (HTTP 403), the client automatically falls back to a `curl` subprocess, and you can always pass a browser-resolved ID via `connectByChatroomId()`.
 2. Connects to Kick's public Pusher WebSocket (`ws-us2.pusher.com`).
 3. Subscribes to `chatrooms.{id}.v2` and parses `App\Events\ChatMessageEvent` frames.
 4. Auto-reconnects on drops, keepalive ping every 30 s.

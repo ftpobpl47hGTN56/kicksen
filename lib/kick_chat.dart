@@ -3,8 +3,8 @@
 /// Reading chat requires no authentication: Kick delivers chat over a public
 /// Pusher WebSocket — the same one the kick.com frontend uses. Sending
 /// messages is done separately through the official Kick API
-/// (`https://api.kick.com/public/v1`) with OAuth 2.1 and is not part of this
-/// package yet.
+/// (`https://api.kick.com/public/v1`) with OAuth 2.1 — see `kick_oauth.dart`
+/// and `kick_api.dart`.
 ///
 /// Note: the Pusher endpoint and the channel-lookup REST call are
 /// undocumented/internal and may change without notice.
@@ -12,6 +12,7 @@ library kick_chat;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Process;
 
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -23,6 +24,12 @@ const String kKickPusherUrl =
 
 /// Pusher event carrying a chat message.
 const String kChatMessageEvent = r'App\Events\ChatMessageEvent';
+
+/// Browser UA used for the internal channel-lookup endpoint.
+const String kBrowserUserAgent =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+    'AppleWebKit/537.36 (KHTML, like Gecko) '
+    'Chrome/120.0.0.0 Safari/537.36';
 
 enum KickChatStatus { resolving, connecting, connected, reconnecting, disconnected }
 
@@ -118,28 +125,74 @@ class KickChatClient {
   /// Resolves the numeric chatroom ID for a channel slug.
   ///
   /// Uses Kick's internal `api/v2` endpoint because the official API does not
-  /// expose chatroom IDs. The endpoint sits behind Cloudflare — browser-like
-  /// headers help, but server-side calls may still get blocked.
+  /// expose chatroom IDs. The endpoint sits behind Cloudflare: Dart's HTTP
+  /// stack gets TLS-fingerprint-blocked on many networks (HTTP 403), so on
+  /// failure we fall back to a `curl` subprocess — the same workaround other
+  /// Kick libraries use. If both fail, call [connectByChatroomId] with an ID
+  /// taken from a real browser.
   Future<int> resolveChatroomId(String channel) async {
-    final uri = Uri.parse('https://kick.com/api/v2/channels/$channel');
-    final resp = await _http.get(uri, headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-          'AppleWebKit/537.36 (KHTML, like Gecko) '
-          'Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'application/json',
-      'Referer': 'https://kick.com/$channel',
-    });
-    if (resp.statusCode != 200) {
-      final body = resp.body.length > 200 ? resp.body.substring(0, 200) : resp.body;
-      throw KickChatException(
-          'GET $uri -> ${resp.statusCode}: $body (Cloudflare? try connectByChatroomId)');
+    try {
+      final resp = await _http
+          .get(
+            Uri.parse('https://kick.com/api/v2/channels/$channel'),
+            headers: {
+              'User-Agent': kBrowserUserAgent,
+              'Accept': 'application/json',
+              'Referer': 'https://kick.com/$channel',
+            },
+          )
+          .timeout(const Duration(seconds: 20));
+      if (resp.statusCode == 200) {
+        final id = _parseChatroomId(resp.body);
+        if (id != null) return id;
+      }
+    } catch (_) {
+      // Fall through to the curl fallback.
     }
-    final data = jsonDecode(resp.body) as Map<String, dynamic>;
-    final id = (data['chatroom'] as Map<String, dynamic>?)?['id'];
-    if (id is! int) {
-      throw KickChatException('channel "$channel" has no chatroom');
+    return _resolveViaCurl(channel);
+  }
+
+  /// Fallback for [resolveChatroomId] when Cloudflare blocks Dart's TLS
+  /// fingerprint: shells out to `curl`, which presents a browser-like
+  /// fingerprint on most systems. Requires curl in PATH (present by default
+  /// on macOS/Linux/Windows 10+; inside Flutter apps on mobile the Dart HTTP
+  /// path usually works because the request comes from a residential IP).
+  Future<int> _resolveViaCurl(String channel) async {
+    try {
+      final result = await Process.run('curl', [
+        '-s',
+        '-m',
+        '20',
+        '-H',
+        'User-Agent: $kBrowserUserAgent',
+        '-H',
+        'Accept: application/json',
+        '-H',
+        'Referer: https://kick.com/$channel',
+        'https://kick.com/api/v2/channels/$channel',
+      ]);
+      if (result.exitCode == 0) {
+        final id = _parseChatroomId(result.stdout as String);
+        if (id != null) return id;
+      }
+    } catch (_) {
+      // curl missing or failed — handled below.
     }
-    return id;
+    throw KickChatException(
+      'could not resolve chatroom id for "$channel" (Cloudflare blocked the '
+      'request). Use connectByChatroomId() with an ID taken from '
+      'https://kick.com/api/v2/channels/$channel in a browser.',
+    );
+  }
+
+  static int? _parseChatroomId(String body) {
+    try {
+      final data = jsonDecode(body) as Map<String, dynamic>;
+      final id = (data['chatroom'] as Map<String, dynamic>?)?['id'];
+      return id is int ? id : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Resolves the chatroom ID and starts listening.
