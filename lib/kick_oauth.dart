@@ -119,18 +119,21 @@ class KickOAuth {
   }
 
   /// Builds the URL the user must open in a browser to authorize the app.
+  ///
+  /// `response_type=code` is mandatory — without it Kick silently redirects
+  /// to the (404) site root instead of showing an error.
   Uri buildAuthorizationUrl({
     required List<String> scopes,
     required KickPkceSession pkce,
   }) {
     return Uri.parse(authorizeUrl).replace(queryParameters: {
+      'response_type': 'code',
       'client_id': clientId,
       'redirect_uri': redirectUri,
       'state': pkce.state,
       'scope': scopes.join(' '),
       'code_challenge': pkce.challenge,
       'code_challenge_method': 'S256',
-      'prompt': 'consent',
       // Kick workaround: required when the redirect_uri host is 127.0.0.1.
       if (Uri.parse(redirectUri).host == '127.0.0.1') 'redirect': '127.0.0.1',
     });
