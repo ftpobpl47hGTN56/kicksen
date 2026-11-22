@@ -6,84 +6,14 @@
 /// alongside the PKCE verifier.
 library kick_oauth;
 
-import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
-import 'package:http/io_client.dart';
 
 /// Kick OAuth server host (deliberately separate from the API host).
 const String kKickOAuthBase = 'https://id.kick.com';
-
-final _workerAddressCache = <String, String>{};
-
-Future<String> _resolveWorkerAddress(String host) async {
-  final cached = _workerAddressCache[host];
-  if (cached != null) return cached;
-
-  try {
-    final addresses = await InternetAddress.lookup(
-      host,
-    ).timeout(const Duration(seconds: 5));
-    for (final address in addresses) {
-      if (address.type == InternetAddressType.IPv4) {
-        return _workerAddressCache[host] = address.address;
-      }
-    }
-  } catch (_) {}
-
-  Object? lastError;
-  final endpoints = [
-    ['1.1.1.1', '/dns-query'],
-    ['8.8.8.8', '/resolve'],
-  ];
-  for (final endpoint in endpoints) {
-    try {
-      final response = await http
-          .get(
-            Uri.https(endpoint[0], endpoint[1], {'name': host, 'type': 'A'}),
-            headers: const {'Accept': 'application/dns-json'},
-          )
-          .timeout(const Duration(seconds: 10));
-      final data = jsonDecode(response.body) as Map<String, dynamic>;
-      final answers = data['Answer'] as List? ?? const [];
-      for (final answer in answers.whereType<Map<String, dynamic>>()) {
-        final address = answer['data'];
-        if (answer['type'] == 1 && address is String) {
-          return _workerAddressCache[host] = address;
-        }
-      }
-      throw StateError('No IPv4 address returned for $host');
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw SocketException('Failed to resolve $host: $lastError');
-}
-
-http.Client _proxyHttpClient(String proxyBaseUrl) {
-  final host = Uri.parse(proxyBaseUrl).host;
-  if (!Platform.isAndroid || !host.endsWith('.workers.dev')) {
-    return http.Client();
-  }
-
-  final io = HttpClient();
-  io.findProxy = (_) => 'DIRECT';
-  io.connectionFactory = (uri, proxyHost, proxyPort) async {
-    final address = await _resolveWorkerAddress(uri.host);
-    final task = await Socket.startConnect(address, uri.port);
-    return ConnectionTask<Socket>.fromSocket(
-      task.socket.then(
-        (socket) => SecureSocket.secure(socket, host: uri.host),
-      ),
-      task.cancel,
-    );
-  };
-  return IOClient(io);
-}
 
 class KickOAuthException implements Exception {
   KickOAuthException(this.message);
@@ -167,7 +97,7 @@ class KickOAuth {
     http.Client? httpClient,
   }) : clientSecret = null,
        proxyBaseUrl = proxyBaseUrl.replaceAll(RegExp(r'/$'), ''),
-       _http = httpClient ?? _proxyHttpClient(proxyBaseUrl);
+       _http = httpClient ?? http.Client();
 
   static const String authorizeUrl = '$kKickOAuthBase/oauth/authorize';
   static const String tokenUrl = '$kKickOAuthBase/oauth/token';

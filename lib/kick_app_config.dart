@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:kick_chat/kick_oauth.dart';
+import 'package:kick_chat/kick_proxy_http_client.dart';
 
 const kKicksenClientId = '01M7XZE4WQFNX8NQ5BZS8YWB6M';
 const kKicksenRedirectUri = 'http://localhost:3000/callback';
@@ -25,5 +26,6 @@ KickOAuth? createKicksenOAuth() {
     clientId: kKicksenClientId,
     proxyBaseUrl: kKicksenOAuthProxyUrl,
     redirectUri: kKicksenRedirectUri,
+    httpClient: Platform.isAndroid ? KickProxyHttpClient() : null,
   );
 }
