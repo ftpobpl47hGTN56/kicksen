@@ -4,7 +4,7 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:material_ui/material_ui.dart';
 
-/// Displays an emote from bytes, with a curl fallback for networks where
+/// Displays an emote from bytes, with a desktop curl fallback for networks where
 /// Flutter's HTTP stack is blocked or fails TLS interception checks.
 class KickEmoteImage extends StatefulWidget {
   const KickEmoteImage({
@@ -71,34 +71,28 @@ class _KickEmoteImageState extends State<KickEmoteImage> {
       httpError = error;
     }
 
+    if (Platform.isAndroid) {
+      throw StateError('Image download failed: $httpError');
+    }
+
     try {
-      final result = await Process.run(
-        'curl',
-        [
-          '-sS',
-          '-L',
-          '--fail',
-          '--max-time',
-          '20',
-          '-A',
-          _userAgent,
-          url,
-        ],
-        stdoutEncoding: null,
-      );
+      final result = await Process.run('curl', [
+        '-sS',
+        '-L',
+        '--fail',
+        '--max-time',
+        '20',
+        '-A',
+        _userAgent,
+        url,
+      ], stdoutEncoding: null);
       final stdout = result.stdout;
-      if (result.exitCode == 0 &&
-          stdout is List<int> &&
-          stdout.isNotEmpty) {
+      if (result.exitCode == 0 && stdout is List<int> && stdout.isNotEmpty) {
         return Uint8List.fromList(stdout);
       }
-      throw StateError(
-        'curl exit ${result.exitCode}: ${result.stderr}',
-      );
+      throw StateError('curl exit ${result.exitCode}: ${result.stderr}');
     } catch (curlError) {
-      throw StateError(
-        'Image download failed: $httpError; curl: $curlError',
-      );
+      throw StateError('Image download failed: $httpError; curl: $curlError');
     }
   }
 
@@ -131,9 +125,7 @@ class _KickEmoteImageState extends State<KickEmoteImage> {
     return SizedBox(
       width: widget.width,
       height: widget.height,
-      child: const Center(
-        child: Icon(Icons.image_not_supported, size: 20),
-      ),
+      child: const Center(child: Icon(Icons.image_not_supported, size: 20)),
     );
   }
 }

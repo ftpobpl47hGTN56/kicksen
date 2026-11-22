@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:kick_chat/kick_oauth.dart';
 import 'package:material_ui/material_ui.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class KickLoginResult {
   const KickLoginResult({required this.token, required this.oauth});
@@ -101,7 +102,8 @@ class _KickLoginDialogState extends State<KickLoginDialog> {
       if (mounted) {
         setState(() {
           _authorizationUrl = null;
-          _error = 'Не удалось открыть локальный порт 3000. Закройте программу, '
+          _error =
+              'Не удалось открыть локальный порт 3000. Закройте программу, '
               'которая его использует, и повторите вход.';
         });
       }
@@ -115,6 +117,15 @@ class _KickLoginDialogState extends State<KickLoginDialog> {
   /// In particular, `cmd /c start` can treat the OAuth query separators (`&`)
   /// as command separators, opening a truncated URL and causing a Kick 404.
   Future<void> _launchBrowser(Uri url) async {
+    if (Platform.isAndroid) {
+      final launched = await launchUrl(
+        url,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!launched) throw StateError('No browser available');
+      return;
+    }
+
     final value = url.toString();
     if (Platform.isWindows) {
       await Process.start('rundll32.exe', [
@@ -157,13 +168,22 @@ class _KickLoginDialogState extends State<KickLoginDialog> {
     final code = request.uri.queryParameters['code'];
     final state = request.uri.queryParameters['state'];
     final oauthError = request.uri.queryParameters['error'];
-    if (oauthError != null || code == null || code.isEmpty || state != pkce.state) {
+    if (oauthError != null ||
+        code == null ||
+        code.isEmpty ||
+        state != pkce.state) {
       request.response.statusCode = HttpStatus.badRequest;
-      request.response.headers.contentType = ContentType('text', 'html', charset: 'utf-8');
-      request.response.write(_callbackPage(
-        'Не удалось подтвердить вход',
-        'Вернитесь в Kicksen и повторите попытку.',
-      ));
+      request.response.headers.contentType = ContentType(
+        'text',
+        'html',
+        charset: 'utf-8',
+      );
+      request.response.write(
+        _callbackPage(
+          'Не удалось подтвердить вход',
+          'Вернитесь в Kicksen и повторите попытку.',
+        ),
+      );
       await request.response.close();
       if (mounted) {
         setState(() => _error = 'Kick не подтвердил вход. Повторите попытку.');
@@ -172,11 +192,17 @@ class _KickLoginDialogState extends State<KickLoginDialog> {
     }
 
     if (_callbackReceived) {
-      request.response.headers.contentType = ContentType('text', 'html', charset: 'utf-8');
-      request.response.write(_callbackPage(
-        'Подтверждение уже получено',
-        'Можно закрыть эту страницу и вернуться в Kicksen.',
-      ));
+      request.response.headers.contentType = ContentType(
+        'text',
+        'html',
+        charset: 'utf-8',
+      );
+      request.response.write(
+        _callbackPage(
+          'Подтверждение уже получено',
+          'Можно закрыть эту страницу и вернуться в Kicksen.',
+        ),
+      );
       await request.response.close();
       return;
     }
@@ -189,11 +215,17 @@ class _KickLoginDialogState extends State<KickLoginDialog> {
       });
     }
 
-    request.response.headers.contentType = ContentType('text', 'html', charset: 'utf-8');
-    request.response.write(_callbackPage(
-      'Подтверждение получено',
-      'Можно закрыть эту страницу и вернуться в Kicksen.',
-    ));
+    request.response.headers.contentType = ContentType(
+      'text',
+      'html',
+      charset: 'utf-8',
+    );
+    request.response.write(
+      _callbackPage(
+        'Подтверждение получено',
+        'Можно закрыть эту страницу и вернуться в Kicksen.',
+      ),
+    );
     await request.response.close();
     await _stopCallbackServer();
 
@@ -298,10 +330,7 @@ class _KickLoginDialogState extends State<KickLoginDialog> {
               ],
               if (_error != null) ...[
                 const SizedBox(height: 16),
-                Text(
-                  _error!,
-                  style: const TextStyle(color: Color(0xFFFFB4AB)),
-                ),
+                Text(_error!, style: const TextStyle(color: Color(0xFFFFB4AB))),
               ],
             ],
           ),
@@ -319,8 +348,8 @@ class _KickLoginDialogState extends State<KickLoginDialog> {
             _busy
                 ? 'Ожидайте…'
                 : authorizationStarted
-                    ? 'Открыть Kick снова'
-                    : 'Открыть Kick',
+                ? 'Открыть Kick снова'
+                : 'Открыть Kick',
           ),
         ),
       ],

@@ -17,7 +17,7 @@ library kick_chat;
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Process;
+import 'dart:io' show Platform, Process;
 import 'dart:math';
 
 import 'package:http/http.dart' as http;
@@ -42,7 +42,10 @@ class KickPusherConfig {
 
   /// Last known-good config (observed 2026-11), used when the realtime
   /// config endpoint is unreachable.
-  static const fallback = KickPusherConfig(appKey: '34bf7a0ff419a2a775b9', cluster: 'us2');
+  static const fallback = KickPusherConfig(
+    appKey: '34bf7a0ff419a2a775b9',
+    cluster: 'us2',
+  );
 
   final String appKey;
   final String cluster;
@@ -68,7 +71,13 @@ class KickChannelIds {
   final int? userId;
 }
 
-enum KickChatStatus { resolving, connecting, connected, reconnecting, disconnected }
+enum KickChatStatus {
+  resolving,
+  connecting,
+  connected,
+  reconnecting,
+  disconnected,
+}
 
 class KickChatException implements Exception {
   KickChatException(this.message);
@@ -87,10 +96,10 @@ class KickBadge {
   final int? count;
 
   factory KickBadge.fromJson(Map<String, dynamic> json) => KickBadge(
-        type: json['type'] as String? ?? '',
-        text: json['text'] as String? ?? '',
-        count: json['count'] as int?,
-      );
+    type: json['type'] as String? ?? '',
+    text: json['text'] as String? ?? '',
+    count: json['count'] as int?,
+  );
 }
 
 /// The author of a chat message.
@@ -146,7 +155,8 @@ class KickChatMessage {
 
 /// Reads the live chat of one Kick channel.
 class KickChatClient {
-  KickChatClient({http.Client? httpClient}) : _http = httpClient ?? http.Client();
+  KickChatClient({http.Client? httpClient})
+    : _http = httpClient ?? http.Client();
 
   final http.Client _http;
 
@@ -206,7 +216,10 @@ class KickChatClient {
     } catch (_) {
       // Fall through to the curl fallback.
     }
-    return _resolveChannelIdsViaCurl(channel);
+    if (!Platform.isAndroid) return _resolveChannelIdsViaCurl(channel);
+    throw KickChatException(
+      'could not resolve ids for "$channel": the Kick request was blocked.',
+    );
   }
 
   Future<KickChannelIds> _resolveChannelIdsViaCurl(String channel) async {
@@ -261,8 +274,10 @@ class KickChatClient {
     try {
       final resp = await _http
           .post(
-            Uri.parse('https://web.kick.com/api/v1/realtime'
-                '/channels/$channelId/chat/connection'),
+            Uri.parse(
+              'https://web.kick.com/api/v1/realtime'
+              '/channels/$channelId/chat/connection',
+            ),
             headers: {
               'User-Agent': kBrowserUserAgent,
               'Accept': 'application/json',
@@ -271,7 +286,9 @@ class KickChatClient {
             body: jsonEncode({
               'client': {
                 'id': List.generate(
-                    16, (_) => _random.nextInt(256).toRadixString(16).padLeft(2, '0')).join(),
+                  16,
+                  (_) => _random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+                ).join(),
                 'type': 'web',
               },
               'capabilities': {
@@ -285,10 +302,13 @@ class KickChatClient {
       if (resp.statusCode == 200) {
         final data = jsonDecode(resp.body) as Map<String, dynamic>;
         final connections =
-            ((data['data'] as Map<String, dynamic>?)?['connections'] as List?) ?? const [];
+            ((data['data'] as Map<String, dynamic>?)?['connections']
+                as List?) ??
+            const [];
         for (final conn in connections.whereType<Map<String, dynamic>>()) {
           if (conn['provider'] == 'pusher') {
-            final creds = (conn['credentials'] as Map<String, dynamic>?) ?? const {};
+            final creds =
+                (conn['credentials'] as Map<String, dynamic>?) ?? const {};
             final key = creds['app_key'];
             final cluster = creds['cluster'];
             if (key is String && cluster is String) {
@@ -363,7 +383,11 @@ class KickChatClient {
         await ws.sink.close();
         return;
       }
-      _wsSub = ws.stream.listen(_onFrame, onDone: _onDone, onError: (_) => _onDone());
+      _wsSub = ws.stream.listen(
+        _onFrame,
+        onDone: _onDone,
+        onError: (_) => _onDone(),
+      );
       // Server activity_timeout is 120 s; ping well within it.
       _keepalive = Timer.periodic(const Duration(seconds: 30), (_) {
         _send({'event': 'pusher:ping', 'data': const {}});
@@ -373,7 +397,8 @@ class KickChatClient {
     }
   }
 
-  void _send(Map<String, dynamic> payload) => _ws?.sink.add(jsonEncode(payload));
+  void _send(Map<String, dynamic> payload) =>
+      _ws?.sink.add(jsonEncode(payload));
 
   void _onFrame(dynamic frame) {
     final Map<String, dynamic> event;
@@ -410,11 +435,13 @@ class KickChatClient {
       code = (data as Map<String, dynamic>)['code'] as int? ?? 0;
     } catch (_) {}
     if (code >= 4000 && code < 4100 && _ids != null && !_closed) {
-      unawaited(fetchRealtimeConfig(_ids!.channelId).then((config) async {
-        _config = config;
-        await _teardownSocket();
-        if (!_closed) await _openSocket();
-      }));
+      unawaited(
+        fetchRealtimeConfig(_ids!.channelId).then((config) async {
+          _config = config;
+          await _teardownSocket();
+          if (!_closed) await _openSocket();
+        }),
+      );
     }
   }
 
@@ -448,13 +475,16 @@ class KickChatClient {
       final decoded = raw is String ? jsonDecode(raw) : raw;
       final map = decoded as Map<String, dynamic>;
       final sender = (map['sender'] as Map<String, dynamic>?) ?? const {};
-      final identity = (sender['identity'] as Map<String, dynamic>?) ?? const {};
+      final identity =
+          (sender['identity'] as Map<String, dynamic>?) ?? const {};
       final badges = ((identity['badges'] as List?) ?? const [])
           .whereType<Map<String, dynamic>>()
           .map(KickBadge.fromJson)
           .toList();
-      final originalSender = (map['original_sender'] as Map<String, dynamic>?) ?? const {};
-      final originalMessage = (map['original_message'] as Map<String, dynamic>?) ?? const {};
+      final originalSender =
+          (map['original_sender'] as Map<String, dynamic>?) ?? const {};
+      final originalMessage =
+          (map['original_message'] as Map<String, dynamic>?) ?? const {};
       return KickChatMessage(
         id: map['id'] as String? ?? '',
         chatroomId: map['chatroom_id'] as int? ?? _ids?.chatroomId ?? 0,

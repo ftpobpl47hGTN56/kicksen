@@ -1,8 +1,9 @@
 # Dart / Flutter
 .dart_tool/
 .packages
+.flutter-plugins
+.flutter-plugins-dependencies
 build/
-pubspec.lock
 
 # Local credentials and app state
 .kick_token.json

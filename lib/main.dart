@@ -10,6 +10,7 @@ import 'package:kick_chat/kick_emote_image.dart';
 import 'package:kick_chat/kick_emote_picker.dart';
 import 'package:kick_chat/kick_emotes.dart';
 import 'package:kick_chat/kick_oauth.dart';
+import 'package:kick_chat/kick_storage.dart';
 import 'package:material_ui/material_ui.dart';
 
 void main() {
@@ -112,7 +113,7 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Future<void> _restoreSession() async {
-    final file = File('.kick_token.json');
+    final file = await kickLocalFile('.kick_token.json');
     if (!await file.exists()) return;
 
     try {
@@ -160,8 +161,8 @@ class _ChatPageState extends State<ChatPage> {
     try {
       final api = KickApiClient(accessToken: result.token.accessToken);
       final user = await api.getCurrentUser();
-      await File('.kick_token.json')
-          .writeAsString(jsonEncode(result.token.toJson()));
+      final tokenFile = await kickLocalFile('.kick_token.json');
+      await tokenFile.writeAsString(jsonEncode(result.token.toJson()));
       if (!mounted) return;
       setState(() {
         _token = result.token;
@@ -195,7 +196,7 @@ class _ChatPageState extends State<ChatPage> {
       // Local sign-out still succeeds if the revocation endpoint is unavailable.
     }
     try {
-      final file = File('.kick_token.json');
+      final file = await kickLocalFile('.kick_token.json');
       if (await file.exists()) await file.delete();
     } catch (_) {}
   }
@@ -215,7 +216,8 @@ class _ChatPageState extends State<ChatPage> {
         return null;
       }
       token = await oauth.refresh(token);
-      await File('.kick_token.json').writeAsString(jsonEncode(token.toJson()));
+      final tokenFile = await kickLocalFile('.kick_token.json');
+      await tokenFile.writeAsString(jsonEncode(token.toJson()));
       _token = token;
       _api = KickApiClient(accessToken: token.accessToken);
     }
@@ -263,7 +265,7 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Future<void> _restoreChannels() async {
-    final file = File(_channelsFilePath);
+    final file = await kickLocalFile(_channelsFilePath);
     if (!await file.exists()) return;
 
     try {
@@ -303,7 +305,8 @@ class _ChatPageState extends State<ChatPage> {
     });
     _channelPersistence = _channelPersistence.then((_) async {
       try {
-        await File(_channelsFilePath).writeAsString(contents);
+        final file = await kickLocalFile(_channelsFilePath);
+        await file.writeAsString(contents);
       } catch (_) {
         // Chat remains usable when the local channel cache is unavailable.
       }

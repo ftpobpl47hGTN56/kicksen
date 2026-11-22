@@ -8,8 +8,14 @@ Cross-platform **Kick** chat client — a Chatsen-style app for [Kick.com](https
 - Flutter screen: Chatsen-style channel tabs, independent live chats, unread counters, replies, badges and Kick emotes.
 - Open channels and the selected tab are restored and reconnect automatically after restarting the app.
 - 7TV global/channel emotes, BetterTTV global emotes and prefix autocomplete in the message composer.
-- OAuth 2.1 (PKCE) login and sending through the official Kick API are available in the core, CLI example and Windows app.
-- The Flutter app restores the gitignored `.kick_token.json` session when possible; the client secret itself is never persisted.
+- OAuth 2.1 (PKCE) login and sending through the official Kick API are available in the core, CLI example, Android app and Windows app.
+- The Flutter app restores the saved OAuth session when possible; the client secret itself is never persisted.
+
+## Get the Android APK
+
+Every push to `main` triggers the **Android APK** GitHub Actions workflow. Open the latest successful run and download `kicksen-android-debug` from **Artifacts**, then extract and install `app-debug.apk` on your phone. Android may ask you to allow installation from this source.
+
+No local Flutter, Dart or Android SDK installation is needed for this workflow. OAuth tokens and open channels are stored in the app's private Android storage.
 
 ## Run the Windows app
 
@@ -21,9 +27,9 @@ flutter pub get
 flutter run -d windows
 ```
 
-On the home tab, enter a channel slug such as `xqc`, or paste a full `https://kick.com/xqc` link, and press **Добавить канал**. Each channel keeps its own connection, messages, composer and emote set while you switch tabs. Open channels and the selected tab are saved in the gitignored `.kick_channels.json` file and reconnect automatically on the next launch; message history is not persisted. No login is required to read chat.
+On the home tab, enter a channel slug such as `xqc`, or paste a full `https://kick.com/xqc` link, and press **Добавить канал**. Each channel keeps its own connection, messages, composer and emote set while you switch tabs. Open channels and the selected tab are saved locally and reconnect automatically on the next launch; Windows uses the gitignored `.kick_channels.json` file, while Android uses private app storage. Message history is not persisted. No login is required to read chat.
 
-To send messages, press **Войти**, enter your Kick application's Client ID and Client Secret, and approve access in the browser. The app listens on localhost and completes the login automatically; no callback URL copying is needed. Once connected and signed in, type in the bottom field and press Enter. Typing at least two characters of a loaded 7TV/BTTV emote name opens autocomplete; select an item to insert its code. The client secret stays in memory; only the token cache is written to `.kick_token.json`, which remains gitignored.
+To send messages, press **Войти**, enter your Kick application's Client ID and Client Secret, and approve access in the browser. The app listens on localhost and completes the login automatically; no callback URL copying is needed. Once connected and signed in, type in the bottom field and press Enter. Typing at least two characters of a loaded 7TV/BTTV emote name opens autocomplete; select an item to insert its code. The client secret stays in memory; only the token cache is persisted locally.
 
 ## Quickstart: read a channel from Dart
 
@@ -57,7 +63,7 @@ Never commit OAuth client secrets or `.kick_token.json`.
 
 ## How reading works
 
-1. **IDs**: resolves `channel_id` + `chatroom_id` for a slug via `kick.com/api/v2/channels/{slug}` (internal API). If Dart HTTP is blocked by Cloudflare, the client falls back to a `curl` subprocess.
+1. **IDs**: resolves `channel_id` + `chatroom_id` for a slug via `kick.com/api/v2/channels/{slug}` (internal API). On desktop, if Dart HTTP is blocked by Cloudflare, the client falls back to a `curl` subprocess; Android uses Dart HTTP directly.
 2. **Realtime config**: requests the current per-channel Pusher `app_key` and `cluster` from Kick's realtime endpoint. A compiled-in fallback is used if that request fails.
 3. **Socket**: subscribes to `chatrooms.{chatroom_id}.v2`, parses `App\Events\ChatMessageEvent` frames, sender colors, badges and replies. Keepalive runs every 30 seconds; dropped connections reconnect automatically.
 4. Kick emotes arrive as `[emote:{id}:{name}]`; the Flutter screen resolves them through `https://files.kick.com/emotes/{id}/fullsize`.
@@ -70,8 +76,8 @@ Never commit OAuth client secrets or `.kick_token.json`.
 | OAuth 2.1 login (PKCE, refresh, revoke) | `id.kick.com` | Core and CLI tested |
 | Send message (user / bot, replies) | Official `POST /public/v1/chat` | Core and CLI tested |
 | Delete message | Official `DELETE /public/v1/chat/{id}` | Implemented |
-| Flutter live-chat screen | Flutter Windows | First version |
-| Flutter OAuth and sending controls | Official Kick API | Implemented in Windows app |
+| Flutter live-chat screen | Flutter Android and Windows | First version |
+| Flutter OAuth and sending controls | Official Kick API | Implemented in Android and Windows apps |
 | 7TV global + Kick channel emotes | 7TV v3 API | Implemented |
 | BTTV global emotes | BetterTTV public API | Implemented |
 | Emote autocomplete | Flutter composer | Implemented |
