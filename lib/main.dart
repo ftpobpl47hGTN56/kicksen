@@ -6,6 +6,7 @@ import 'package:kick_chat/kick_api.dart';
 import 'package:kick_chat/kick_auth_dialog.dart';
 import 'package:kick_chat/kick_channel_session.dart';
 import 'package:kick_chat/kick_chat.dart';
+import 'package:kick_chat/kick_emote_image.dart';
 import 'package:kick_chat/kick_emote_picker.dart';
 import 'package:kick_chat/kick_emotes.dart';
 import 'package:kick_chat/kick_oauth.dart';
@@ -1042,11 +1043,10 @@ class _ComposerState extends State<_Composer> {
                     return ListTile(
                       dense: true,
                       onTap: () => _insertEmote(emote),
-                      leading: Image.network(
-                        emote.imageUrl,
+                      leading: KickEmoteImage(
+                        url: emote.imageUrl,
                         width: 32,
                         height: 32,
-                        fit: BoxFit.contain,
                       ),
                       title: Text(emote.name),
                       subtitle: Text(emote.provider),
@@ -1275,12 +1275,10 @@ class _MessageRow extends StatelessWidget {
         message: '$name • $provider',
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 2),
-          child: Image.network(
-            url,
+          child: KickEmoteImage(
+            url: url,
             width: 30,
             height: 30,
-            fit: BoxFit.contain,
-            errorBuilder: (_, _, _) => Text(name),
           ),
         ),
       ),
