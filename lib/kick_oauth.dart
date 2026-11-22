@@ -83,16 +83,28 @@ class KickPkceSession {
 class KickOAuth {
   KickOAuth({
     required this.clientId,
-    required this.clientSecret,
+    required String clientSecret,
     required this.redirectUri,
     http.Client? httpClient,
-  }) : _http = httpClient ?? http.Client();
+  }) : clientSecret = clientSecret,
+       proxyBaseUrl = null,
+       _http = httpClient ?? http.Client();
+
+  KickOAuth.proxy({
+    required this.clientId,
+    required String proxyBaseUrl,
+    required this.redirectUri,
+    http.Client? httpClient,
+  }) : clientSecret = null,
+       proxyBaseUrl = proxyBaseUrl.replaceAll(RegExp(r'/$'), ''),
+       _http = httpClient ?? http.Client();
 
   static const String authorizeUrl = '$kKickOAuthBase/oauth/authorize';
   static const String tokenUrl = '$kKickOAuthBase/oauth/token';
 
   final String clientId;
-  final String clientSecret;
+  final String? clientSecret;
+  final String? proxyBaseUrl;
   final String redirectUri;
   final http.Client _http;
 
@@ -162,21 +174,34 @@ class KickOAuth {
 
   /// Revokes an access or refresh token.
   Future<void> revoke(String token) async {
+    final proxy = proxyBaseUrl;
     await _http.post(
-      Uri.parse('$kKickOAuthBase/oauth/revoke'),
-      body: {'token': token},
+      Uri.parse(proxy == null ? '$kKickOAuthBase/oauth/revoke' : '$proxy/revoke'),
+      headers: proxy == null
+          ? null
+          : const {'Content-Type': 'application/json'},
+      body: proxy == null
+          ? {'token': token}
+          : jsonEncode({'token': token}),
     );
   }
 
   Future<KickToken> _tokenRequest(Map<String, String> body) async {
+    final proxy = proxyBaseUrl;
     final resp = await _http.post(
-      Uri.parse(tokenUrl),
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: {
-        'client_id': clientId,
-        'client_secret': clientSecret,
-        ...body,
+      Uri.parse(proxy == null ? tokenUrl : '$proxy/token'),
+      headers: {
+        'Content-Type': proxy == null
+            ? 'application/x-www-form-urlencoded'
+            : 'application/json',
       },
+      body: proxy == null
+          ? {
+              'client_id': clientId,
+              'client_secret': clientSecret!,
+              ...body,
+            }
+          : jsonEncode(body),
     );
     final data = jsonDecode(resp.body) as Map<String, dynamic>;
     if (resp.statusCode != 200) {

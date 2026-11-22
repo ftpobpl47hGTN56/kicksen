@@ -17,6 +17,18 @@ Every push to `main` triggers the **Android APK** GitHub Actions workflow. Open 
 
 No local Flutter, Dart or Android SDK installation is needed for this workflow. OAuth tokens and open channels are stored in the app's private Android storage.
 
+### Configure Kick sign-in
+
+Kick requires a confidential Client Secret for OAuth token exchange and refresh, so the Android app uses the Cloudflare Worker in `oauth_proxy/` instead of embedding that secret in the APK.
+
+1. Install Node.js, open the `oauth_proxy` directory and run `npx wrangler login`.
+2. Run `npx wrangler secret put KICK_CLIENT_SECRET` and enter the Kick application's secret.
+3. Run `npx wrangler deploy` and copy the resulting `https://kicksen-oauth.<account>.workers.dev` URL.
+4. In the GitHub repository, open **Settings → Secrets and variables → Actions → Variables** and create `KICK_OAUTH_PROXY_URL` with that URL.
+5. Re-run the **Android APK** workflow. The login dialog will then open Kick's official username/password page without asking for developer keys.
+
+The Worker does not log in users itself or persist tokens; it only adds the server-held Client Secret to requests forwarded to Kick.
+
 ## Run the Windows app
 
 Install Flutter 3.50.1 or newer and Visual Studio with the **Desktop development with C++** workload. Then, from the repository root:
@@ -29,7 +41,7 @@ flutter run -d windows
 
 On the home tab, enter a channel slug such as `xqc`, or paste a full `https://kick.com/xqc` link, and press **Добавить канал**. Each channel keeps its own connection, messages, composer and emote set while you switch tabs. Open channels and the selected tab are saved locally and reconnect automatically on the next launch; Windows uses the gitignored `.kick_channels.json` file, while Android uses private app storage. Message history is not persisted. No login is required to read chat.
 
-To send messages, press **Войти**, enter your Kick application's Client ID and Client Secret, and approve access in the browser. The app listens on localhost and completes the login automatically; no callback URL copying is needed. Once connected and signed in, type in the bottom field and press Enter. Typing at least two characters of a loaded 7TV/BTTV emote name opens autocomplete; select an item to insert its code. The client secret stays in memory; only the token cache is persisted locally.
+To send messages, press **Войти** and sign in on Kick's official page. The app listens on localhost and completes the login automatically; no callback URL copying or developer keys are needed in the app. Once connected and signed in, type in the bottom field and press Enter. Typing at least two characters of a loaded 7TV/BTTV emote name opens autocomplete; select an item to insert its code. The client secret stays in memory; only the token cache is persisted locally.
 
 ## Quickstart: read a channel from Dart
 

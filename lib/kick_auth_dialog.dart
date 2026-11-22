@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:kick_chat/kick_app_config.dart';
 import 'package:kick_chat/kick_oauth.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -20,11 +21,7 @@ class KickLoginDialog extends StatefulWidget {
 }
 
 class _KickLoginDialogState extends State<KickLoginDialog> {
-  static const _redirectUri = 'http://localhost:3000/callback';
   static const _scopes = ['user:read', 'channel:read', 'chat:write'];
-
-  late final TextEditingController _clientIdController;
-  late final TextEditingController _clientSecretController;
 
   KickOAuth? _oauth;
   KickPkceSession? _pkce;
@@ -37,29 +34,15 @@ class _KickLoginDialogState extends State<KickLoginDialog> {
   String? _error;
 
   @override
-  void initState() {
-    super.initState();
-    _clientIdController = TextEditingController(
-      text: Platform.environment['KICK_CLIENT_ID'] ?? '',
-    );
-    _clientSecretController = TextEditingController(
-      text: Platform.environment['KICK_CLIENT_SECRET'] ?? '',
-    );
-  }
-
-  @override
   void dispose() {
     unawaited(_stopCallbackServer());
-    _clientIdController.dispose();
-    _clientSecretController.dispose();
     super.dispose();
   }
 
   Future<void> _openAuthorization() async {
-    final clientId = _clientIdController.text.trim();
-    final clientSecret = _clientSecretController.text.trim();
-    if (clientId.isEmpty || clientSecret.isEmpty) {
-      setState(() => _error = 'Введите Client ID и Client Secret.');
+    final oauth = createKicksenOAuth();
+    if (oauth == null) {
+      setState(() => _error = 'Сервер входа пока не настроен.');
       return;
     }
 
@@ -72,11 +55,6 @@ class _KickLoginDialogState extends State<KickLoginDialog> {
 
     try {
       await _startCallbackServer();
-      final oauth = KickOAuth(
-        clientId: clientId,
-        clientSecret: clientSecret,
-        redirectUri: _redirectUri,
-      );
       final pkce = KickOAuth.generatePkce();
       final url = oauth.buildAuthorizationUrl(scopes: _scopes, pkce: pkce);
 
@@ -275,22 +253,10 @@ class _KickLoginDialogState extends State<KickLoginDialog> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               const Text(
-                'Client Secret используется только в памяти и не сохраняется '
-                'в файлах или репозитории.',
+                'Откроется официальная страница Kick. Введите там логин и '
+                'пароль, затем разрешите доступ Kicksen. Приложение не получает '
+                'ваш пароль.',
                 style: TextStyle(height: 1.45),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _clientIdController,
-                enabled: !_busy && !authorizationStarted,
-                decoration: const InputDecoration(labelText: 'Client ID'),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _clientSecretController,
-                enabled: !_busy && !authorizationStarted,
-                obscureText: true,
-                decoration: const InputDecoration(labelText: 'Client Secret'),
               ),
               if (authorizationStarted) ...[
                 const SizedBox(height: 20),
@@ -349,7 +315,7 @@ class _KickLoginDialogState extends State<KickLoginDialog> {
                 ? 'Ожидайте…'
                 : authorizationStarted
                 ? 'Открыть Kick снова'
-                : 'Открыть Kick',
+                : 'Войти через Kick',
           ),
         ),
       ],

@@ -1,0 +1,7 @@
+name = "kicksen-oauth"
+main = "worker.js"
+compatibility_date = "2026-11-22"
+
+[vars]
+KICK_CLIENT_ID = "01M7XZE4WQFNX8NQ5BZS8YWB6M"
+KICK_REDIRECT_URI = "http://localhost:3000/callback"

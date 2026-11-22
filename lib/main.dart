@@ -1,8 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
-
 import 'package:kick_chat/kick_api.dart';
+import 'package:kick_chat/kick_app_config.dart';
 import 'package:kick_chat/kick_auth_dialog.dart';
 import 'package:kick_chat/kick_channel_session.dart';
 import 'package:kick_chat/kick_chat.dart';
@@ -120,16 +119,7 @@ class _ChatPageState extends State<ChatPage> {
       var token = KickToken.fromJson(
         jsonDecode(await file.readAsString()) as Map<String, dynamic>,
       );
-      final clientId = Platform.environment['KICK_CLIENT_ID'];
-      final clientSecret = Platform.environment['KICK_CLIENT_SECRET'];
-      KickOAuth? oauth;
-      if (clientId != null && clientSecret != null) {
-        oauth = KickOAuth(
-          clientId: clientId,
-          clientSecret: clientSecret,
-          redirectUri: 'http://localhost:3000/callback',
-        );
-      }
+      final oauth = createKicksenOAuth();
       if (token.isExpired) {
         if (oauth == null || token.refreshToken.isEmpty) return;
         token = await oauth.refresh(token);
