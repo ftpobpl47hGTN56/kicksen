@@ -16,9 +16,7 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: flutter analyze --no-fatal-infos
-      - run: flutter build apk --debug --dart-define=KICK_OAUTH_PROXY_URL="$KICK_OAUTH_PROXY_URL"
-        env:
-          KICK_OAUTH_PROXY_URL: ${{ vars.KICK_OAUTH_PROXY_URL }}
+      - run: flutter build apk --debug
       - uses: actions/upload-artifact@v4
         with:
           name: kicksen-android-debug

@@ -23,9 +23,8 @@ Kick requires a confidential Client Secret for OAuth token exchange and refresh,
 
 1. Install Node.js, open the `oauth_proxy` directory and run `npx wrangler login`.
 2. Run `npx wrangler secret put KICK_CLIENT_SECRET` and enter the Kick application's secret.
-3. Run `npx wrangler deploy` and copy the resulting `https://kicksen-oauth.<account>.workers.dev` URL.
-4. In the GitHub repository, open **Settings → Secrets and variables → Actions → Variables** and create `KICK_OAUTH_PROXY_URL` with that URL.
-5. Re-run the **Android APK** workflow. The login dialog will then open Kick's official username/password page without asking for developer keys.
+3. Run `npx wrangler deploy`. The deployed Worker URL is configured in `lib/kick_app_config.dart`.
+4. Re-run the **Android APK** workflow. The login dialog will then open Kick's official username/password page without asking for developer keys.
 
 The Worker does not log in users itself or persist tokens; it only adds the server-held Client Secret to requests forwarded to Kick.
 
