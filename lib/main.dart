@@ -49,20 +49,20 @@ class KicksenApp extends StatelessWidget {
 }
 
 String _statusLabel(KickChatStatus status) => switch (status) {
-      KickChatStatus.resolving => 'Поиск канала',
-      KickChatStatus.connecting => 'Подключение',
-      KickChatStatus.connected => 'В эфире',
-      KickChatStatus.reconnecting => 'Переподключение',
-      KickChatStatus.disconnected => 'Отключено',
-    };
+  KickChatStatus.resolving => 'Поиск канала',
+  KickChatStatus.connecting => 'Подключение',
+  KickChatStatus.connected => 'В эфире',
+  KickChatStatus.reconnecting => 'Переподключение',
+  KickChatStatus.disconnected => 'Отключено',
+};
 
 Color _statusColor(KickChatStatus status) => switch (status) {
-      KickChatStatus.connected => KicksenApp.kickGreen,
-      KickChatStatus.resolving ||
-      KickChatStatus.connecting ||
-      KickChatStatus.reconnecting => const Color(0xFFFFC107),
-      KickChatStatus.disconnected => const Color(0xFF768077),
-    };
+  KickChatStatus.connected => KicksenApp.kickGreen,
+  KickChatStatus.resolving ||
+  KickChatStatus.connecting ||
+  KickChatStatus.reconnecting => const Color(0xFFFFC107),
+  KickChatStatus.disconnected => const Color(0xFF768077),
+};
 
 class ChatPage extends StatefulWidget {
   const ChatPage({super.key});
@@ -73,6 +73,7 @@ class ChatPage extends StatefulWidget {
 
 class _ChatPageState extends State<ChatPage> {
   static const _maxMessages = 400;
+  static const _channelsFilePath = '.kick_channels.json';
 
   final _channelController = TextEditingController(text: 'tapiviao');
   final _emoteRepository = KickEmoteRepository();
@@ -86,6 +87,7 @@ class _ChatPageState extends State<ChatPage> {
   var _selectedIndex = 0;
   String? _homeError;
   bool _authBusy = false;
+  Future<void> _channelPersistence = Future.value();
 
   KickChannelSession? get _activeSession =>
       _selectedIndex == 0 ? null : _sessions[_selectedIndex - 1];
@@ -93,7 +95,10 @@ class _ChatPageState extends State<ChatPage> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _restoreSession());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_restoreSession());
+      unawaited(_restoreChannels());
+    });
   }
 
   @override
@@ -155,9 +160,8 @@ class _ChatPageState extends State<ChatPage> {
     try {
       final api = KickApiClient(accessToken: result.token.accessToken);
       final user = await api.getCurrentUser();
-      await File('.kick_token.json').writeAsString(
-        jsonEncode(result.token.toJson()),
-      );
+      await File('.kick_token.json')
+          .writeAsString(jsonEncode(result.token.toJson()));
       if (!mounted) return;
       setState(() {
         _token = result.token;
@@ -258,10 +262,60 @@ class _ChatPageState extends State<ChatPage> {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
+  Future<void> _restoreChannels() async {
+    final file = File(_channelsFilePath);
+    if (!await file.exists()) return;
+
+    try {
+      final data =
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      final channels = (data['channels'] as List? ?? const [])
+          .whereType<String>()
+          .map(_normalizeChannel)
+          .where((channel) => channel.isNotEmpty);
+      final knownChannels = <String>{};
+      final sessions = <KickChannelSession>[];
+      for (final channel in channels) {
+        if (knownChannels.add(channel.toLowerCase())) {
+          sessions.add(KickChannelSession(channel));
+        }
+      }
+
+      if (!mounted) return;
+      final savedIndex = (data['selected_index'] as num?)?.toInt() ?? 0;
+      setState(() {
+        _sessions.addAll(sessions);
+        _selectedIndex = savedIndex.clamp(0, _sessions.length);
+      });
+      for (final session in sessions) {
+        _bindSession(session);
+        unawaited(_connectSession(session));
+      }
+    } catch (_) {
+      // A damaged channel cache must not prevent the app from starting.
+    }
+  }
+
+  void _saveChannels() {
+    final contents = jsonEncode({
+      'channels': [for (final session in _sessions) session.channel],
+      'selected_index': _selectedIndex,
+    });
+    _channelPersistence = _channelPersistence.then((_) async {
+      try {
+        await File(_channelsFilePath).writeAsString(contents);
+      } catch (_) {
+        // Chat remains usable when the local channel cache is unavailable.
+      }
+    });
+  }
+
   void _openChannel() {
     final channel = _normalizeChannel(_channelController.text);
     if (channel.isEmpty) {
-      setState(() => _homeError = 'Введите название канала или ссылку на него.');
+      setState(
+        () => _homeError = 'Введите название канала или ссылку на него.',
+      );
       return;
     }
 
@@ -279,6 +333,7 @@ class _ChatPageState extends State<ChatPage> {
       _selectedIndex = _sessions.length;
       _homeError = null;
     });
+    _saveChannels();
     _bindSession(session);
     unawaited(_connectSession(session));
   }
@@ -291,14 +346,18 @@ class _ChatPageState extends State<ChatPage> {
 
     session.messageSubscription = session.client.messages.listen((message) {
       if (!mounted || !_sessions.contains(session)) return;
-      final followLatest = !session.scrollController.hasClients ||
+      final followLatest =
+          !session.scrollController.hasClients ||
           session.scrollController.position.pixels >=
               session.scrollController.position.maxScrollExtent - 96;
 
       setState(() {
         session.messages.add(message);
         if (session.messages.length > _maxMessages) {
-          session.messages.removeRange(0, session.messages.length - _maxMessages);
+          session.messages.removeRange(
+            0,
+            session.messages.length - _maxMessages,
+          );
         }
         if (!identical(_activeSession, session)) session.unread++;
       });
@@ -317,12 +376,16 @@ class _ChatPageState extends State<ChatPage> {
 
     try {
       await session.client.connect(session.channel);
-      if (!mounted || !_sessions.contains(session) || generation != session.generation) {
+      if (!mounted ||
+          !_sessions.contains(session) ||
+          generation != session.generation) {
         return;
       }
       unawaited(_loadEmotes(session, generation));
     } catch (error) {
-      if (!mounted || !_sessions.contains(session) || generation != session.generation) {
+      if (!mounted ||
+          !_sessions.contains(session) ||
+          generation != session.generation) {
         return;
       }
       setState(() {
@@ -338,7 +401,9 @@ class _ChatPageState extends State<ChatPage> {
     final channel = kickUserId == null
         ? const <KickEmote>[]
         : await _emoteRepository.channelEmotes(kickUserId);
-    if (!mounted || !_sessions.contains(session) || generation != session.generation) {
+    if (!mounted ||
+        !_sessions.contains(session) ||
+        generation != session.generation) {
       return;
     }
     setState(() {
@@ -360,6 +425,7 @@ class _ChatPageState extends State<ChatPage> {
 
   void _selectHome() {
     setState(() => _selectedIndex = 0);
+    _saveChannels();
   }
 
   void _selectSession(int index) {
@@ -368,6 +434,7 @@ class _ChatPageState extends State<ChatPage> {
       _sessions[index].unread = 0;
       _homeError = null;
     });
+    _saveChannels();
     _scheduleScrollToLatest(_sessions[index]);
   }
 
@@ -383,6 +450,7 @@ class _ChatPageState extends State<ChatPage> {
         _selectedIndex = index == 0 ? 0 : index;
       }
     });
+    _saveChannels();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(session.dispose());
     });
@@ -393,10 +461,14 @@ class _ChatPageState extends State<ChatPage> {
     session.scrollScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       session.scrollScheduled = false;
-      if (!mounted || !_sessions.contains(session) || !session.scrollController.hasClients) {
+      if (!mounted ||
+          !_sessions.contains(session) ||
+          !session.scrollController.hasClients) {
         return;
       }
-      session.scrollController.jumpTo(session.scrollController.position.maxScrollExtent);
+      session.scrollController.jumpTo(
+        session.scrollController.position.maxScrollExtent,
+      );
     });
   }
 
@@ -451,8 +523,8 @@ class _ChatPageState extends State<ChatPage> {
             onPressed: _authBusy
                 ? null
                 : _user == null
-                    ? _login
-                    : _signOut,
+                ? _login
+                : _signOut,
             icon: Icon(_user == null ? Icons.login : Icons.logout),
             label: Text(_user == null ? 'Войти' : 'Выйти'),
           ),
@@ -581,14 +653,21 @@ class _HomeView extends StatelessWidget {
                 ),
                 if (error != null) ...[
                   const SizedBox(height: 12),
-                  Text(error!, style: const TextStyle(color: Color(0xFFFFB4AB))),
+                  Text(
+                    error!,
+                    style: const TextStyle(color: Color(0xFFFFB4AB)),
+                  ),
                 ],
                 const SizedBox(height: 28),
                 if (sessions.isEmpty)
                   const Padding(
                     padding: EdgeInsets.symmetric(vertical: 40),
                     child: Center(
-                      child: Icon(Icons.forum_outlined, size: 48, color: KicksenApp.kickGreen),
+                      child: Icon(
+                        Icons.forum_outlined,
+                        size: 48,
+                        color: KicksenApp.kickGreen,
+                      ),
                     ),
                   )
                 else ...[
@@ -615,7 +694,9 @@ class _HomeView extends StatelessWidget {
                             if (sessions[index].unread > 0)
                               Padding(
                                 padding: const EdgeInsets.only(right: 8),
-                                child: _UnreadBadge(count: sessions[index].unread),
+                                child: _UnreadBadge(
+                                  count: sessions[index].unread,
+                                ),
                               ),
                             IconButton(
                               onPressed: () => onClose(sessions[index]),
@@ -839,7 +920,9 @@ class _ChannelTab extends StatelessWidget {
           decoration: BoxDecoration(
             border: Border(
               bottom: BorderSide(
-                color: selected ? KicksenApp.kickGreen : const Color(0xFF263027),
+                color: selected
+                    ? KicksenApp.kickGreen
+                    : const Color(0xFF263027),
                 width: 2,
               ),
             ),
@@ -946,9 +1029,8 @@ class _ComposerState extends State<_Composer> {
       return;
     }
 
-    final match = RegExp(r'(?:^|\s)([^\s]*)$').firstMatch(
-      value.text.substring(0, cursor),
-    );
+    final match = RegExp(r'(?:^|\s)([^\s]*)$')
+        .firstMatch(value.text.substring(0, cursor));
     final prefix = match?.group(1) ?? '';
     if (prefix.length < 2) {
       setState(() => _suggestions = []);
@@ -996,8 +1078,12 @@ class _ComposerState extends State<_Composer> {
     final end = selection.isValid ? selection.end : value.text.length;
     final before = value.text.substring(0, start);
     final after = value.text.substring(end);
-    final leadingSpace = before.isNotEmpty && !RegExp(r'\s$').hasMatch(before) ? ' ' : '';
-    final trailingSpace = after.isEmpty || !RegExp(r'^\s').hasMatch(after) ? ' ' : '';
+    final leadingSpace = before.isNotEmpty && !RegExp(r'\s$').hasMatch(before)
+        ? ' '
+        : '';
+    final trailingSpace = after.isEmpty || !RegExp(r'^\s').hasMatch(after)
+        ? ' '
+        : '';
     final replacement = '$leadingSpace${emote.name}$trailingSpace';
     final updated = value.text.replaceRange(start, end, replacement);
     widget.controller.value = TextEditingValue(
@@ -1018,8 +1104,8 @@ class _ComposerState extends State<_Composer> {
     final hint = !widget.connected
         ? 'Сначала подключитесь к каналу'
         : !widget.signedIn
-            ? 'Можно проверить эмоуты; для отправки нужен вход'
-            : 'Сообщение в чат…';
+        ? 'Можно проверить эмоуты; для отправки нужен вход'
+        : 'Сообщение в чат…';
 
     return Material(
       color: const Color(0xFF111712),
@@ -1163,8 +1249,8 @@ class _EmptyChat extends StatelessWidget {
               isLoading
                   ? 'Подключаемся к ${session.channel}…'
                   : isLive
-                      ? 'Чат ${session.channel} подключён. Ожидаем сообщения…'
-                      : 'Канал ${session.channel} отключён.',
+                  ? 'Чат ${session.channel} подключён. Ожидаем сообщения…'
+                  : 'Канал ${session.channel} отключён.',
               textAlign: TextAlign.center,
               style: const TextStyle(fontSize: 16, height: 1.5),
             ),
@@ -1196,10 +1282,7 @@ class _MessageRow extends StatelessWidget {
                 'Ответ ${message.replyToSender}: ${message.replyToContent ?? ''}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: Color(0xFF9AA69B),
-                  fontSize: 12,
-                ),
+                style: const TextStyle(color: Color(0xFF9AA69B), fontSize: 12),
               ),
             ),
           Text.rich(
@@ -1251,7 +1334,8 @@ class _MessageRow extends StatelessWidget {
       offset = match.end;
     }
 
-    if (offset < content.length) _addTextSpans(spans, content.substring(offset));
+    if (offset < content.length)
+      _addTextSpans(spans, content.substring(offset));
     if (spans.isEmpty) _addTextSpans(spans, content);
     return spans;
   }
@@ -1275,11 +1359,7 @@ class _MessageRow extends StatelessWidget {
         message: '$name • $provider',
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 2),
-          child: KickEmoteImage(
-            url: url,
-            width: 30,
-            height: 30,
-          ),
+          child: KickEmoteImage(url: url, width: 30, height: 30),
         ),
       ),
     );

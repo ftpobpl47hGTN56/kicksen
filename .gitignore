@@ -4,8 +4,9 @@
 build/
 pubspec.lock
 
-# Local credentials — never commit tokens
+# Local credentials and app state
 .kick_token.json
+.kick_channels.json
 
 # IDE
 .idea/
