@@ -9,6 +9,9 @@ build/
 .kick_token.json
 .kick_channels.json
 
+# Local tooling
+**/.wrangler/
+
 # IDE
 .idea/
 .vscode/
