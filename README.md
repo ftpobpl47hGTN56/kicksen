@@ -2,7 +2,7 @@
 
 **Chatsen Mod, ported to Kick.** An Android chat client that combines the familiar Chatsen Mod interface and customization options with Kick chat, OAuth authorization, channels, and emotes.
 
-[Releases](https://github.com/ftpobpl47hGTN56/kicksen/releases) · [Ready release draft](RELEASE_DRAFT.md) · [Draft release template](.github/RELEASE_TEMPLATE.md)
+[Releases](https://github.com/ftpobpl47hGTN56/kicksen/releases) · [Ready release draft](RELEASE_DRAFT.md)
 
 ## Screenshots
 
