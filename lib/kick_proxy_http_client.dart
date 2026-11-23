@@ -7,20 +7,21 @@ class KickProxyHttpClient extends http.BaseClient {
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
     final body = await request.finalize().toBytes();
-    final result = await _channel.invokeMethod<Map<String, dynamic>>('post', {
+    final result = await _channel.invokeMethod<dynamic>('request', {
+      'method': request.method,
       'url': request.url.toString(),
       'headers': request.headers,
       'body': body,
     });
-    final responseBody = result?['body'] as List<int>? ?? const <int>[];
-    final responseHeaders =
-        (result?['headers'] as Map?)?.map(
+    final response = Map<String, dynamic>.from(result as Map);
+    final responseBody = response['body'] as List<int>? ?? const <int>[];
+    final responseHeaders = (response['headers'] as Map?)?.map(
           (key, value) => MapEntry(key.toString(), value.toString()),
         ) ??
         const <String, String>{};
     return http.StreamedResponse(
       http.ByteStream.fromBytes(responseBody),
-      result?['status'] as int? ?? 500,
+      response['status'] as int? ?? 500,
       headers: responseHeaders,
     );
   }

@@ -1,0 +1,703 @@
+import 'dart:io';
+import 'dart:math';
+
+import '/Accounts/AccountsCubit.dart';
+import '/BlockedUsers/BlockedUsersCubit.dart';
+import '/Commands/CommandsCubit.dart';
+import '/Components/UI/BlurModal.dart';
+import '/Components/UI/CustomSliverAppBarDelegate.dart';
+import '/Components/UI/NoAppBarBlur.dart';
+import '/Components/UI/Tile.dart';
+import '/Consts.dart';
+import '/DataExport.dart';
+import '/Settings/Settings.dart';
+import '/Settings/SettingsEvent.dart';
+import '/Settings/SettingsState.dart';
+import '/Theme/ThemeBloc.dart';
+import '/Theme/ThemeEvent.dart';
+import '/Theme/ThemeManager.dart';
+import '/Theme/ThemeState.dart';
+import '/Pages/BlockedTerms.dart';
+import '/Pages/BlockedUsers.dart';
+import '/Mentions/CustomMentionsCubit.dart';
+import 'package:collection/collection.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+import 'package:flutter_chatsen_irc/Twitch.dart' as twitch;
+
+import 'Commands.dart';
+import 'CustomMentions.dart';
+import '/Components/UserPrefs.dart';
+import '/Components/AppearanceSettings.dart';
+import '/Components/Backup.dart';
+
+class SettingsEntry extends StatelessWidget {
+  final String? category;
+  final String title;
+  final String? description;
+  final Function(BuildContext context, String? category, String title, String? description) builder;
+
+  const SettingsEntry({
+    Key? key,
+    this.category,
+    required this.title,
+    this.description,
+    required this.builder,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) => builder(context, category, title, description);
+}
+
+class SettingsPage extends StatefulWidget {
+  final twitch.Client client;
+
+  const SettingsPage({
+    Key? key,
+    required this.client,
+  }) : super(key: key);
+
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
+  final TextEditingController searchController = TextEditingController();
+
+  @override
+  void dispose() {
+    searchController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: NoAppBarBlur(),
+        body: BlocBuilder<Settings, SettingsState>(
+          builder: (context, state) {
+            if (state is SettingsLoaded) {
+              var entries = [
+                // DearKing mod: язык + простое оформление (фон и акцент) вместо Цвет/Яркость/Контраст
+                SettingsEntry(
+                  category: tr('Theme', 'Тема'),
+                  title: tr('Language', 'Язык'),
+                  description: 'Русский English',
+                  builder: (context, category, title, description) => const LanguageSwitch(),
+                ),
+                SettingsEntry(
+                  category: tr('Theme', 'Тема'),
+                  title: tr('Appearance', 'Оформление'),
+                  description: tr('Background and accent color', 'Цвет фона и акцента'),
+                  builder: (context, category, title, description) => const AppearancePicker(),
+                ),
+                SettingsEntry(
+                  category: tr('Theme', 'Тема'),
+                  title: tr('Accent outlines', 'Акцентные рамки'),
+                  description: tr('Translucent panels', 'Полупрозрачные панели'),
+                  builder: (context, category, title, description) => const PanelSwitches(),
+                ),
+                SettingsEntry(
+                  category: tr('Setup', 'Первый запуск'),
+                  title: tr('Setup screen', 'Экран настройки'),
+                  description: tr('Show the setup screen next startup', 'Показать экран первичной настройки при следующем запуске'),
+                  builder: (context, category, title, description) => Tile(
+                    title: title,
+                    subtitle: description,
+                    onTap: () => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(setupScreen: !state.setupScreen))),
+                    trailing: Switch.adaptive(
+                      activeColor: Theme.of(context).colorScheme.primary,
+                      onChanged: (bool value) => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(setupScreen: value))),
+                      value: state.setupScreen,
+                    ),
+                  ),
+                ),
+                SettingsEntry(
+                  category: tr('Notifications', 'Уведомления'),
+                  title: tr('Notification on whispers', 'Уведомления о личных сообщениях'),
+                  description: tr('Sends a system notification when a whisper is received', 'Системное уведомление при получении личного сообщения'),
+                  builder: (context, category, title, description) => Tile(
+                    title: title,
+                    subtitle: description,
+                    onTap: () => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(notificationOnWhisper: !state.notificationOnWhisper))),
+                    trailing: Switch.adaptive(
+                      activeColor: Theme.of(context).colorScheme.primary,
+                      onChanged: (bool value) => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(notificationOnWhisper: value))),
+                      value: state.notificationOnWhisper,
+                    ),
+                  ),
+                ),
+                SettingsEntry(
+                  category: tr('Notifications', 'Уведомления'),
+                  title: tr('Notification on mentions', 'Уведомления об упоминаниях'),
+                  description: tr('Sends a system notification when you are mentioned in an open chat', 'Системное уведомление, когда вас упомянули в открытом чате'),
+                  builder: (context, category, title, description) => Tile(
+                    title: title,
+                    subtitle: description,
+                    onTap: () => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(notificationOnMention: !state.notificationOnMention))),
+                    trailing: Switch.adaptive(
+                      activeColor: Theme.of(context).colorScheme.primary,
+                      onChanged: (bool value) => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(notificationOnMention: value))),
+                      value: state.notificationOnMention,
+                    ),
+                  ),
+                ),
+                if (Platform.isIOS && !kPlayStoreRelease)
+                  SettingsEntry(
+                    category: tr('Notifications', 'Уведомления'),
+                    title: tr('Background notifications', 'Фоновые уведомления'),
+                    description: tr('Creates an audio player that plays an empty/muted audio file to keep the application running on iOS. (note: the audio needs to be playing in order for the application to keep running)', 'Запускает беззвучный аудиоплеер, чтобы приложение не выгружалось в фоне на iOS (пока звук «играет», приложение работает)'),
+                    builder: (context, category, title, description) => Tile(
+                      title: title,
+                      subtitle: description,
+                      onTap: () => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(notificationBackground: !state.notificationBackground))),
+                      trailing: Switch.adaptive(
+                        activeColor: Theme.of(context).colorScheme.primary,
+                        onChanged: (bool value) => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(notificationBackground: value))),
+                        value: state.notificationBackground,
+                      ),
+                    ),
+                  ),
+                // SettingsEntry(
+                //   category: 'Notifications',
+                //   title: 'Custom mentions',
+                //   description: 'A list of custom words or regexes that mentions you',
+                //   builder: (context, category, title, description) => Tile(
+                //     title: title,
+                //     subtitle: description,
+                //     onTap: () {},
+                //   ),
+                // ),
+                SettingsEntry(
+                  category: tr('Mentions', 'Упоминания'),
+                  title: tr('Configure custom mentions', 'Настроить свои упоминания'),
+                  description: tr('Allows you to create and configure custom mention words and regexes to be pinged with', 'Слова и регулярки, на которые будет срабатывать пинг'),
+                  builder: (context, category, title, description) => Tile(
+                    leading: Padding(
+                      padding: const EdgeInsets.all(8.0),
+                      child: Icon((Platform.isMacOS || Platform.isIOS) ? CupertinoIcons.bell : Icons.alternate_email),
+                    ),
+                    title: title,
+                    subtitle: description,
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (context) => CustomMentionsPage(),
+                      ),
+                    ),
+                  ),
+                ),
+                SettingsEntry(
+                  category: tr('Mentions', 'Упоминания'),
+                  title: tr('Add a @ in front of user mentions', 'Ставить @ перед ником'),
+                  description: tr('When using autocompletion, clicking a username will add a @ in front of the username.', 'При выборе ника в автодополнении перед ним добавляется @.'),
+                  builder: (context, category, title, description) => Tile(
+                    title: title,
+                    subtitle: description,
+                    onTap: () => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(mentionWithAt: !state.mentionWithAt))),
+                    trailing: Switch.adaptive(
+                      activeColor: Theme.of(context).colorScheme.primary,
+                      onChanged: (bool value) => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(mentionWithAt: value))),
+                      value: state.mentionWithAt,
+                    ),
+                  ),
+                ),
+                SettingsEntry(
+                  category: tr('Message', 'Сообщения'),
+                  title: tr('Show timestamp', 'Показывать время'),
+                  description: tr('Displays the time at which a message has been sent', 'Время отправки рядом с каждым сообщением'),
+                  builder: (context, category, title, description) => Tile(
+                    title: title,
+                    subtitle: description,
+                    onTap: () => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(messageTimestamp: !state.messageTimestamp))),
+                    trailing: Switch.adaptive(
+                      activeColor: Theme.of(context).colorScheme.primary,
+                      onChanged: (bool value) => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(messageTimestamp: value))),
+                      value: state.messageTimestamp,
+                    ),
+                  ),
+                ),
+                SettingsEntry(
+                  category: tr('Message', 'Сообщения'),
+                  title: tr('Media previews', 'Превью медиа'),
+                  description: tr('Show images, GIFs, videos and link cards under messages', 'Картинки, GIF, видео и карточки ссылок под сообщениями'),
+                  builder: (context, category, title, description) => Tile(
+                    title: title,
+                    subtitle: description,
+                    onTap: () => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(messageImagePreview: !state.messageImagePreview))),
+                    trailing: Switch.adaptive(
+                      activeColor: Theme.of(context).colorScheme.primary,
+                      onChanged: (bool value) => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(messageImagePreview: value))),
+                      value: state.messageImagePreview,
+                    ),
+                  ),
+                ),
+                SettingsEntry(
+                  category: tr('Message', 'Сообщения'),
+                  title: tr('Line separators', 'Разделители'),
+                  description: tr('Separates every message with a line', 'Линия между сообщениями'),
+                  builder: (context, category, title, description) => Tile(
+                    title: title,
+                    subtitle: description,
+                    onTap: () => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(messageLines: !state.messageLines))),
+                    trailing: Switch.adaptive(
+                      activeColor: Theme.of(context).colorScheme.primary,
+                      onChanged: (bool value) => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(messageLines: value))),
+                      value: state.messageLines,
+                    ),
+                  ),
+                ),
+                // for (var i = 0; i < 10; ++i)
+                SettingsEntry(
+                  category: tr('Message', 'Сообщения'),
+                  title: tr('Chat font size', 'Размер шрифта чата'),
+                  description: tr('Size of nicknames and message text, also the viewer list', 'Размер ников и текста сообщений, а также списка зрителей'),
+                  builder: (context, category, title, description) => const FontSizePicker(),
+                ),
+                SettingsEntry(
+                  category: tr('Message', 'Сообщения'),
+                  title: tr('Mention style', 'Стиль упоминаний'),
+                  description: tr('Font, color, background, outline of @mentions', 'Шрифт, цвет, фон и рамка @упоминаний'),
+                  builder: (context, category, title, description) => const MentionStylePicker(),
+                ),
+                SettingsEntry(
+                  category: tr('Message', 'Сообщения'),
+                  title: tr('Badges next to nicknames', 'Значки у ника'),
+                  description: tr('Show, roles only or hide badges', 'Все, только роли или скрыть значки'),
+                  builder: (context, category, title, description) => const BadgeModePicker(),
+                ),
+                SettingsEntry(
+                  category: tr('Message', 'Сообщения'),
+                  title: tr('Alternate background color', 'Чередование фона'),
+                  description: tr('Changes the background color for each message as a separation', 'Сообщения через одно на чуть другом фоне'),
+                  builder: (context, category, title, description) => Tile(
+                    title: title,
+                    subtitle: description,
+                    onTap: () => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(messageAlternateBackground: !state.messageAlternateBackground))),
+                    trailing: Switch.adaptive(
+                      activeColor: Theme.of(context).colorScheme.primary,
+                      onChanged: (bool value) => BlocProvider.of<Settings>(context).add(SettingsChange(state: state.copyWith(messageAlternateBackground: value))),
+                      value: state.messageAlternateBackground,
+                    ),
+                  ),
+                ),
+                SettingsEntry(
+                  category: tr('Message', 'Сообщения'),
+                  title: tr('Blocked users', 'Заблокированные'),
+                  description: tr('Allows you to block users so that you cannot see their messages', 'Сообщения этих пользователей не показываются'),
+                  builder: (context, category, title, description) => Tile(
+                    leading: Padding(
+                      padding: const EdgeInsets.all(8.0),
+                      child: Icon((Platform.isMacOS || Platform.isIOS) ? CupertinoIcons.nosign : Icons.block),
+                    ),
+                    title: title,
+                    subtitle: description,
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (context) => BlockedUsersPage(),
+                      ),
+                    ),
+                  ),
+                ),
+                // SettingsEntry(
+                //   category: 'Message',
+                //   title: 'Blocked terms',
+                //   description: 'Allows you to block terms so that the messages don\'t show up in chat',
+                //   builder: (context, category, title, description) => Tile(
+                //     leading: Padding(
+                //       padding: const EdgeInsets.all(8.0),
+                //       child: Icon((Platform.isMacOS || Platform.isIOS) ? CupertinoIcons.nosign : Icons.block),
+                //     ),
+                //     title: title,
+                //     subtitle: description,
+                //     onTap: () => Navigator.of(context).push(
+                //       MaterialPageRoute(
+                //         builder: (context) => BlockedTermsPage(),
+                //       ),
+                //     ),
+                //   ),
+                // ),
+                SettingsEntry(
+                  category: tr('Commands', 'Команды'),
+                  title: tr('Configure custom commands', 'Свои команды'),
+                  description: tr('Allows you to create and configure custom commands to be used in chat', 'Шаблоны сообщений, вызываемые командой в чате'),
+                  builder: (context, category, title, description) => Tile(
+                      leading: Padding(
+                        padding: const EdgeInsets.all(8.0),
+                        child: Icon((Platform.isMacOS || Platform.isIOS) ? CupertinoIcons.chevron_left_slash_chevron_right : Icons.text_format),
+                      ),
+                      title: title,
+                      subtitle: description,
+                      onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (context) => CommandsPage()))),
+                ),
+                // DearKing mod: резервная копия
+                SettingsEntry(
+                  category: tr('Backup', 'Резервная копия'),
+                  title: tr('Auto-save settings', 'Автосохранение настроек'),
+                  description: tr('Saved to Downloads/ChatsenMod when the app is minimized (without login)', 'Сохраняется в Загрузки/ChatsenMod при сворачивании (без данных входа)'),
+                  builder: (context, category, title, description) => AnimatedBuilder(
+                    animation: UserPrefs.instance,
+                    builder: (context, _) {
+                      final t = UserPrefs.instance.lastBackupTime;
+                      final p = UserPrefs.instance.lastBackupPath;
+                      final last = t == null
+                          ? ''
+                          : '\n' + tr('Last: ', 'Последнее: ') + '${t.day.toString().padLeft(2, '0')}.${t.month.toString().padLeft(2, '0')} ${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}' + (p == null ? '' : ' · ${p.split('/').last}');
+                      return Tile(
+                        leading: const Padding(padding: EdgeInsets.all(8.0), child: Icon(Icons.save_outlined)),
+                        title: title,
+                        subtitle: '$description$last',
+                        onTap: () => UserPrefs.instance.setAutoBackup(!UserPrefs.instance.autoBackup),
+                        trailing: Switch.adaptive(
+                          activeColor: Theme.of(context).colorScheme.primary,
+                          value: UserPrefs.instance.autoBackup,
+                          onChanged: (v) async {
+                            await UserPrefs.instance.setAutoBackup(v);
+                            if (v) await Backup.autoSave();
+                          },
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                SettingsEntry(
+                  category: tr('Backup', 'Резервная копия'),
+                  title: tr('Export to file', 'Экспорт в файл'),
+                  description: tr('Save all settings, ignore list and nicknames to a .json file', 'Все настройки, игнор и локальные имена в файл .json'),
+                  builder: (context, category, title, description) => Tile(
+                    leading: const Padding(padding: EdgeInsets.all(8.0), child: Icon(Icons.file_upload_outlined)),
+                    title: title,
+                    subtitle: description,
+                    onTap: () => Backup.exportToFile(context),
+                  ),
+                ),
+                SettingsEntry(
+                  category: tr('Backup', 'Резервная копия'),
+                  title: tr('Import from file', 'Импорт из файла'),
+                  description: tr('Restore settings from a backup file', 'Восстановить настройки из файла копии'),
+                  builder: (context, category, title, description) => Tile(
+                    leading: const Padding(padding: EdgeInsets.all(8.0), child: Icon(Icons.file_download_outlined)),
+                    title: title,
+                    subtitle: description,
+                    onTap: () => Backup.importFromFile(context),
+                  ),
+                ),
+                SettingsEntry(
+                  category: tr('Backup', 'Резервная копия'),
+                  title: tr('Copy to clipboard', 'Копировать в буфер'),
+                  description: tr('Export as JSON text', 'Экспорт текстом JSON'),
+                  builder: (context, category, title, description) => Tile(
+                    leading: Padding(
+                      padding: const EdgeInsets.all(8.0),
+                      child: Icon((Platform.isMacOS || Platform.isIOS) ? CupertinoIcons.doc_on_clipboard : Icons.copy),
+                    ),
+                    title: title,
+                    subtitle: description,
+                    onTap: () => Backup.exportToClipboard(context),
+                  ),
+                ),
+                SettingsEntry(
+                  category: tr('Backup', 'Резервная копия'),
+                  title: tr('Import from clipboard', 'Импорт из буфера'),
+                  description: tr('Paste JSON copied earlier', 'Вставить скопированный ранее JSON'),
+                  builder: (context, category, title, description) => Tile(
+                    leading: const Padding(padding: EdgeInsets.all(8.0), child: Icon(Icons.content_paste)),
+                    title: title,
+                    subtitle: description,
+                    onTap: () => Backup.importFromClipboard(context),
+                  ),
+                ),
+                SettingsEntry(
+                  category: tr('About', 'О приложении'),
+                  title: tr('Show open-source licenses', 'Лицензии open-source'),
+                  description: tr('Display the list of licenses used by dependencies', 'Лицензии используемых библиотек'),
+                  builder: (context, category, title, description) => Tile(
+                    leading: Padding(
+                      padding: const EdgeInsets.all(8.0),
+                      child: Icon((Platform.isMacOS || Platform.isIOS) ? CupertinoIcons.info_circle_fill : Icons.info),
+                    ),
+                    title: title,
+                    subtitle: description,
+                    onTap: () => showLicensePage(context: context),
+                  ),
+                ),
+                SettingsEntry(
+                  category: tr('About', 'О приложении'),
+                  // title: 'Check for updates',
+                  title: tr('About Chatsen', 'О Chatsen'),
+                  description: tr('Version', 'Версия'),
+                  builder: (context, category, title, description) => FutureBuilder<PackageInfo>(
+                    future: PackageInfo.fromPlatform(),
+                    builder: (context, snapshot) => Tile(
+                      leading: Padding(
+                        padding: const EdgeInsets.all(8.0),
+                        child: Icon((Platform.isMacOS || Platform.isIOS) ? CupertinoIcons.device_phone_portrait : Icons.system_security_update),
+                      ),
+                      title: title,
+                      subtitle: snapshot.hasData ? tr('Running ${snapshot.data!.packageName} ${snapshot.data!.version}+${snapshot.data!.buildNumber}', 'Запущено: ${snapshot.data!.packageName} ${snapshot.data!.version}+${snapshot.data!.buildNumber}') : null,
+                    ),
+                  ),
+                ),
+              ];
+
+              var listChildren = [
+                for (var entryGroup in groupBy<SettingsEntry, String?>(entries.where((entry) => (entry.category?.toLowerCase().contains(searchController.text.toLowerCase()) ?? false) || entry.title.toLowerCase().contains(searchController.text.toLowerCase()) || (entry.description?.toLowerCase().contains(searchController.text.toLowerCase()) ?? false)), (x) => x.category).entries) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(top: 16.0, left: 16.0, right: 16.0, bottom: 4.0),
+                    child: Text(
+                      '${entryGroup.key}',
+                      style: Theme.of(context).textTheme.labelLarge!.copyWith(color: Theme.of(context).colorScheme.primary),
+                    ),
+                  ),
+                  for (var entry in entryGroup.value) entry,
+                ],
+                SizedBox(height: MediaQuery.paddingOf(context).bottom),
+              ];
+
+              return CustomScrollView(
+                slivers: <Widget>[
+                  SliverToBoxAdapter(
+                    child: SizedBox(
+                      height: 128.0 * 1.5,
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 16.0) + EdgeInsets.only(top: MediaQuery.paddingOf(context).top),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SizedBox(height: 24.0),
+                            Row(
+                              children: [
+                                // Container(
+                                //   width: 24.0,
+                                //   height: 24.0,
+                                //   child: IconButton(
+                                //     icon: Icon((Platform.isIOS || Platform.isMacOS) ? Icons.arrow_back_ios : Icons.arrow_back),
+                                //     onPressed: () => Navigator.of(context).pop(),
+                                //     padding: EdgeInsets.zero,
+                                //     iconSize: 24.0,
+                                //   ),
+                                // ),
+                                IconButton(
+                                  icon: Icon((Platform.isIOS || Platform.isMacOS) ? Icons.arrow_back_ios : Icons.arrow_back),
+                                  onPressed: () => Navigator.of(context).pop(),
+                                  padding: EdgeInsets.zero,
+                                  iconSize: 24.0,
+                                ),
+                                Spacer(),
+                                // IconButton(
+                                //   icon: Icon(Icons.web),
+                                //   onPressed: () => launch('https://twitter.com/chatsenapp'),
+                                // ),
+                                IconButton(
+                                  icon: FaIcon(FontAwesomeIcons.twitter),
+                                  onPressed: () => launchUrl(Uri.parse('https://twitter.com/chatsenapp')),
+                                ),
+                                IconButton(
+                                  icon: FaIcon(FontAwesomeIcons.discord),
+                                  onPressed: () => launchUrl(Uri.parse('https://chatsen.app/discord')),
+                                ),
+                                IconButton(
+                                  icon: FaIcon(FontAwesomeIcons.github),
+                                  onPressed: () => launchUrl(Uri.parse('https://github.com/chatsen/chatsen')),
+                                ),
+                                IconButton(
+                                  icon: FaIcon(FontAwesomeIcons.patreon),
+                                  onPressed: () => launchUrl(Uri.parse('https://patreon.com/chatsen')),
+                                ),
+                              ],
+                            ),
+                            Spacer(),
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                              child: Text(
+                                tr('Settings', 'Настройки'),
+                                style: Theme.of(context).textTheme.headlineMedium!.copyWith(
+                                      color: Theme.of(context).colorScheme.onSurface,
+                                    ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  SliverPersistentHeader(
+                    // pinned: true,
+                    floating: true,
+                    delegate: CustomSliverAppBarDelegate(
+                      minHeight: 64.0 + MediaQuery.paddingOf(context).top,
+                      maxHeight: 64.0 + MediaQuery.paddingOf(context).top,
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0) + EdgeInsets.only(top: MediaQuery.paddingOf(context).top),
+                        child: Material(
+                          borderRadius: BorderRadius.circular(64.0),
+                          color: Theme.of(context).colorScheme.surface,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                            child: Center(
+                              child: Row(
+                                children: [
+                                  Icon(Icons.search),
+                                  SizedBox(
+                                    width: 12.0,
+                                  ),
+                                  Expanded(
+                                    child: TextField(
+                                      controller: searchController,
+                                      decoration: InputDecoration(
+                                        hintText: tr('Search settings', 'Поиск по настройкам'),
+                                        isDense: true,
+                                        filled: false,
+                                        border: InputBorder.none,
+                                      ),
+                                      onChanged: (value) => setState(() {}),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.orange.withAlpha(64),
+                          borderRadius: BorderRadius.circular(8.0),
+                          border: Border.all(
+                            width: 2.0,
+                            color: Colors.orange,
+                          ),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.all(8.0),
+                          child: Row(
+                            children: [
+                              SizedBox(width: 8.0),
+                              Icon(Icons.info),
+                              SizedBox(width: 16.0),
+                              Expanded(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      tr('Chatsen is currently work-in-progress!', 'Chatsen ещё в разработке!'),
+                                      style: Theme.of(context).textTheme.titleMedium,
+                                    ),
+                                    SizedBox(height: 2.0),
+                                    Text(
+                                      tr('Create an issue on GitHub or ask on Discord if you encounter a problem.', 'Нашли проблему — создайте issue на GitHub или спросите в Discord.'),
+                                      style: Theme.of(context).textTheme.titleSmall,
+                                    ),
+                                    SizedBox(height: 4.0),
+                                    Text(
+                                      tr('You can support the project on Patreon if you appreciate my work!', 'Проект можно поддержать на Patreon.'),
+                                      // style: Theme.of(context).textTheme.titleSmall,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.green.withAlpha(64),
+                          borderRadius: BorderRadius.circular(8.0),
+                          border: Border.all(
+                            width: 2.0,
+                            color: Colors.green,
+                          ),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.all(8.0),
+                          child: Row(
+                            children: [
+                              SizedBox(width: 8.0),
+                              Icon(Icons.translate),
+                              SizedBox(width: 16.0),
+                              Expanded(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      tr('Chatsen is looking for translators!', 'Chatsen ищет переводчиков!'),
+                                      style: Theme.of(context).textTheme.titleMedium,
+                                    ),
+                                    SizedBox(height: 2.0),
+                                    Text(
+                                      tr('Join the Discord server if you are interested in translating Chatsen to your language.', 'Заходите в Discord, если хотите перевести Chatsen на свой язык.'),
+                                      style: Theme.of(context).textTheme.titleSmall,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  SliverList(
+                    delegate: SliverChildBuilderDelegate(
+                      (BuildContext context, int index) => listChildren[index],
+                      childCount: listChildren.length,
+                    ),
+                  ),
+                ],
+              );
+            }
+            return Center(child: CircularProgressIndicator.adaptive());
+          },
+        ),
+      );
+}
+
+
+/*
+                  // SliverAppBar(
+                  //   pinned: false,
+                  //   snap: false,
+                  //   floating: true,
+                  //   expandedHeight: 128.0 * 1.5,
+                  //   // titleSpacing: 0.0,
+                  //   // leading: Container(),
+                  //   // leadingWidth: 0.0,
+                  //   // automaticallyImplyLeading: false,
+                  //   flexibleSpace: FlexibleSpaceBar(
+                  //     title: Row(
+                  //       children: [
+                  //         Container(
+                  //           width: 24.0,
+                  //           height: 24.0,
+                  //           child: IconButton(
+                  //             icon: Icon(Icons.arrow_back),
+                  //             onPressed: () => Navigator.of(context).pop(),
+                  //             padding: EdgeInsets.zero,
+                  //             iconSize: 24.0,
+                  //           ),
+                  //         ),
+                  //         SizedBox(width: 8.0),
+                  //         Text('Settings'),
+                  //       ],
+                  //     ),
+                  //     titlePadding: EdgeInsets.symmetric(horizontal: 24.0, vertical: 12.0),
+                  //   ),
+                  // ),
+*/

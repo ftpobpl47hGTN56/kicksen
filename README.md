@@ -1,105 +1,57 @@
-# Kicksen
+# ChatsenKick
 
-Cross-platform **Kick** chat client — a Chatsen-style app for [Kick.com](https://kick.com), built with Flutter/Dart. Work in progress.
+**Chatsen Mod, ported to Kick.** An Android chat client that combines the familiar Chatsen Mod interface and customization options with Kick chat, OAuth authorization, channels, and emotes.
 
-## Status
+[Releases](https://github.com/ftpobpl47hGTN56/kicksen/releases) · [Draft release template](.github/RELEASE_TEMPLATE.md)
 
-- Live Kick chat over the public Pusher WebSocket, without authentication.
-- Flutter screen: Chatsen-style channel tabs, independent live chats, unread counters, replies, badges and Kick emotes.
-- Open channels and the selected tab are restored and reconnect automatically after restarting the app.
-- 7TV global/channel emotes, BetterTTV global emotes and prefix autocomplete in the message composer.
-- OAuth 2.1 (PKCE) login and sending through the official Kick API are available in the core, CLI example, Android app and Windows app.
-- The Flutter app restores the saved OAuth session when possible; the client secret itself is never persisted.
+## Screenshots
 
-## Get the Android APK
+<table>
+  <tr>
+    <td><img src="https://github.com/user-attachments/assets/0a38f54a-37f8-4c5d-ad7b-df3c89bb45a3" alt="photo_1" /></td>
+    <td><img src="https://github.com/user-attachments/assets/eb799aed-e9c6-466e-9532-b3ff31ecdc91" alt="photo_2" /></td>
+    <td><img src="https://github.com/user-attachments/assets/32543904-13de-4303-8fda-c134679bfa34" alt="photo_3" /></td>
+    <td><img src="https://github.com/user-attachments/assets/3dfebffe-0668-40ef-b792-b70a6e31cbb0" alt="photo_4" /></td>
+  </tr>
+</table>
 
-Every push to `main` triggers the **Android APK** GitHub Actions workflow. Open the latest successful run and download `kicksen-android-debug` from **Artifacts**, then extract and install `app-debug.apk` on your phone. Android may ask you to allow installation from this source.
+## Features
 
-No local Flutter, Dart or Android SDK installation is needed for this workflow. OAuth tokens and open channels are stored in the app's private Android storage.
+- **Kick chat in real time:** read chat anonymously or sign in with Kick OAuth to send messages.
+- **Multiple channels and accounts:** switch between channel tabs, add several comma-separated usernames at once, and keep a local channel list in Hive.
+- **Online status:** LIVE state, viewer count, category, and stream title from the official `api.kick.com/public/v1` API.
+- **Emotes and badges:** Kick emotes, 7TV, BTTV, FFZ, subscriber badges, an emote picker, and consistent inline emote sizing.
+- **Conversations:** replies, threads, mentions, username autocomplete, user cards, and a searchable viewer list.
+- **Media and links:** image, GIF, video, and link previews.
+- **Chat customization:** font size, timestamps, line separators, mention styles, filters, and ignored users.
+- **Chatsen Mod extras:** local preferences, channel history, notifications where supported, and backup/restore options.
 
-### Configure Kick sign-in
+## Download and install
 
-Kick requires a confidential Client Secret for OAuth token exchange and refresh, so the Android app uses the Cloudflare Worker in `oauth_proxy/` instead of embedding that secret in the APK.
+1. Open [Releases](https://github.com/ftpobpl47hGTN56/kicksen/releases) and download the latest `ChatsenKick-...-release.apk`.
+2. Allow installation from your browser or file manager if Android asks for permission.
+3. Install the APK. Reading chat works without an account; sending messages requires Kick sign-in.
 
-1. Install Node.js, open the `oauth_proxy` directory and run `npx wrangler login`.
-2. Run `npx wrangler secret put KICK_CLIENT_SECRET` and enter the Kick application's secret.
-3. Run `npx wrangler deploy`. The deployed Worker URL is configured in `lib/kick_app_config.dart`.
-4. Re-run the **Android APK** workflow. The login dialog will then open Kick's official username/password page without asking for developer keys.
+**Supported platform:** Android 7.0 (API 24) and newer.
 
-The Worker does not log in users itself or persist tokens; it only adds the server-held Client Secret to requests forwarded to Kick.
+## Build from source
 
-## Run the Windows app
+Requirements: Flutter stable, Android SDK, and JDK 17 or newer.
 
-Install Flutter 3.50.1 or newer and Visual Studio with the **Desktop development with C++** workload. Then, from the repository root:
-
-```powershell
-flutter create --project-name kick_chat --platforms=windows .
+```bash
 flutter pub get
-flutter run -d windows
+flutter analyze --no-fatal-infos --no-fatal-warnings
+flutter build apk --release
 ```
 
-On the home tab, enter a channel slug such as `xqc`, or paste a full `https://kick.com/xqc` link, and press **Добавить канал**. Each channel keeps its own connection, messages, composer and emote set while you switch tabs. Open channels and the selected tab are saved locally and reconnect automatically on the next launch; Windows uses the gitignored `.kick_channels.json` file, while Android uses private app storage. Message history is not persisted. No login is required to read chat.
+The APK is written to `build/app/outputs/flutter-apk/`. The Gradle configuration automatically adds the app version, build number, date, time, and build type to its filename.
 
-To send messages, press **Войти** and sign in on Kick's official page. The app listens on localhost and completes the login automatically; no callback URL copying or developer keys are needed in the app. Once connected and signed in, type in the bottom field and press Enter. Typing at least two characters of a loaded 7TV/BTTV emote name opens autocomplete; select an item to insert its code. The client secret stays in memory; only the token cache is persisted locally.
+## OAuth configuration
 
-## Quickstart: read a channel from Dart
+The app uses Kick OAuth 2.1 with PKCE. The source of the optional Cloudflare Worker used for the authorization-code exchange is included in [`oauth_proxy`](oauth_proxy).
 
-```powershell
-dart pub get
-dart run example/read_chat.dart xqc
-```
+The public client ID and the deployed Worker URL are configured in [`lib/kick_app_config.dart`](lib/kick_app_config.dart). To use your own Worker, update `oauth_proxy/wrangler.toml`, set `KICK_CLIENT_SECRET` with `npx wrangler secret put`, deploy it, and replace the Worker URL in the app configuration.
 
-```dart
-import 'package:kick_chat/kick_chat.dart';
+## License and credits
 
-final client = KickChatClient();
-await client.connect('xqc');
-await for (final msg in client.messages) {
-  print('${msg.sender.username}: ${msg.content}');
-}
-```
-
-## Quickstart: log in and send messages
-
-1. Enable 2FA on kick.com, then create an app at **kick.com → Settings → Developer** with redirect URI `http://localhost:3000/callback`.
-2. Set `KICK_CLIENT_ID` and `KICK_CLIENT_SECRET` in your shell, then run:
-
-```powershell
-dart run example/send_chat.dart <channel>
-```
-
-The first run prints an authorization URL. Open it, approve access, and paste the complete localhost redirect URL back into the terminal. The token is cached in `.kick_token.json` (gitignored) and refreshed automatically. Every following input line is posted through the official Kick API.
-
-Never commit OAuth client secrets or `.kick_token.json`.
-
-## How reading works
-
-1. **IDs**: resolves `channel_id` + `chatroom_id` for a slug via `kick.com/api/v2/channels/{slug}` (internal API). On desktop, if Dart HTTP is blocked by Cloudflare, the client falls back to a `curl` subprocess; Android uses Dart HTTP directly.
-2. **Realtime config**: requests the current per-channel Pusher `app_key` and `cluster` from Kick's realtime endpoint. A compiled-in fallback is used if that request fails.
-3. **Socket**: subscribes to `chatrooms.{chatroom_id}.v2`, parses `App\Events\ChatMessageEvent` frames, sender colors, badges and replies. Keepalive runs every 30 seconds; dropped connections reconnect automatically.
-4. Kick emotes arrive as `[emote:{id}:{name}]`; the Flutter screen resolves them through `https://files.kick.com/emotes/{id}/fullsize`.
-
-## API coverage
-
-| Feature | Mechanism | Status |
-|---|---|---|
-| Read live chat | Pusher WebSocket, dynamic config | Tested live |
-| OAuth 2.1 login (PKCE, refresh, revoke) | `id.kick.com` | Core and CLI tested |
-| Send message (user / bot, replies) | Official `POST /public/v1/chat` | Core and CLI tested |
-| Delete message | Official `DELETE /public/v1/chat/{id}` | Implemented |
-| Flutter live-chat screen | Flutter Android and Windows | First version |
-| Flutter OAuth and sending controls | Official Kick API | Implemented in Android and Windows apps |
-| 7TV global + Kick channel emotes | 7TV v3 API | Implemented |
-| BTTV global emotes | BetterTTV public API | Implemented |
-| Emote autocomplete | Flutter composer | Implemented |
-| Multi-channel tabs | Independent sessions, unread counters | Implemented |
-
-## Disclaimer
-
-Unofficial project, not affiliated with Kick.com. The chatroom-lookup, realtime-config and Pusher endpoints are internal/undocumented and may break without notice; the official API is used wherever it exists.
-
-## License
-
-[GNU AGPL-3.0](LICENSE) — chosen for compatibility with Chatsen (AGPLv3), whose UI code will be ported here.
-
-Credits: [Chatsen](https://github.com/chatsen/chatsen) for the original client architecture; the Kounex/obs_blade project for documenting the 2026 realtime-config flow.
+Based on [Chatsen](https://github.com/chatsen/chatsen) and Chatsen Mod. Distributed under the GNU AGPLv3 license; see [LICENSE](LICENSE). Kick is a trademark of its respective owner. This project is unofficial and is not affiliated with or endorsed by Kick.

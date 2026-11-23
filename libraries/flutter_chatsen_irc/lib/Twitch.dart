@@ -1,0 +1,1507 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
+
+import 'package:collection/collection.dart';
+import 'package:flutter_chatsen_irc/api/chatsen_static/chatsen_static.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:http/http.dart' as http;
+
+import '/IRCMessage.dart';
+import '/Kick.dart';
+
+/// DearKing mod: перевод системных сообщений. Приложение подменяет на свой tr() в main().
+String Function(String en, String ru) ircTr = (en, ru) => en;
+
+/// DearKing mod: сколько сообщений хранить на канал (автоочистка). Задаётся из приложения.
+int ircMaxMessages = 1000;
+
+/// Удалить самые старые сообщения сверх лимита.
+void ircTrim(List list) {
+  if (list.length > ircMaxMessages) list.removeRange(0, list.length - ircMaxMessages);
+}
+
+/// «8 мин 8 с» / «8m 8s» вместо «0:08:08.000000».
+String ircDuration(Duration d) {
+  final parts = <String>[];
+  final days = d.inDays, h = d.inHours % 24, m = d.inMinutes % 60, sec = d.inSeconds % 60;
+  if (days > 0) parts.add(ircTr('${days}d', '$days дн'));
+  if (h > 0) parts.add(ircTr('${h}h', '$h ч'));
+  if (m > 0) parts.add(ircTr('${m}m', '$m мин'));
+  if (sec > 0 || parts.isEmpty) parts.add(ircTr('${sec}s', '$sec с'));
+  return parts.join(' ');
+}
+
+abstract class Listener {
+  void onConnectionStateChange(Connection connection, ConnectionState state);
+  void onChannelStateChange(Channel channel, ChannelState state);
+  void onMessage(Channel? channel, Message message);
+  void onHistoryLoaded(Channel channel);
+  void onWhisper(Channel channel, Message message);
+}
+
+// TODO: Rework with consideration for emote sets and link to emote if available, maybe even owner and whatnot
+class Emote {
+  final String? name;
+  final String? id;
+  final String? provider;
+  final String? set;
+  final List<String?>? mipmap;
+  final bool zeroWidth; // Flag set/Bitfield would be better, for chatsen2 Copesen
+  final String? alt;
+
+  /// DearKing mod: категория и порядок внутри неё (для эмодзи — из emoji.json).
+  final String? category;
+  final int order;
+
+  Emote({
+    this.name,
+    this.id,
+    this.provider,
+    this.set,
+    this.mipmap,
+    this.zeroWidth = false,
+    this.alt,
+    this.category,
+    this.order = 0,
+  });
+
+  /// Порядок категорий эмодзи (как в emoji.json / Unicode).
+  static const emojiCategories = [
+    'Smileys & Emotion', 'People & Body', 'Animals & Nature', 'Food & Drink', 'Travel & Places',
+    'Activities', 'Objects', 'Symbols', 'Flags',
+  ];
+
+  /// 7TV-эмоут из объекта API (REST и события используют одинаковую структуру).
+  static Emote? from7TV(Map emoteData) {
+    final data = emoteData['data'];
+    final id = '${emoteData['id'] ?? data?['id'] ?? ''}';
+    List<String> mipmap;
+    if (data is Map && data['host'] is Map) {
+      final files = List<dynamic>.from(data['host']['files'] ?? const []).where((x) => '${x['format']}'.toUpperCase() == 'WEBP');
+      mipmap = [for (var f in files) 'https:${data['host']['url']}/${f['name']}'];
+    } else {
+      mipmap = id.isEmpty ? [] : [for (var x in ['1x', '2x', '3x', '4x']) 'https://cdn.7tv.app/emote/$id/$x.webp'];
+    }
+    if (mipmap.isEmpty) return null;
+    final flags = (data is Map ? data['flags'] : null) ?? 0;
+    return Emote(name: emoteData['name'], id: id, provider: '7TV', mipmap: mipmap, zeroWidth: (flags & (1 << 8)) == (1 << 8));
+  }
+}
+
+enum MessageTokenType {
+  Text,
+  Link,
+  Image,
+  Video,
+  Emote,
+  EmoteStack,
+  User,
+}
+
+class Badge {
+  final String? tag;
+  final String? name;
+  final String? id;
+  final List<String?>? mipmap;
+  final String? title;
+  final String? description;
+  final String? color;
+  final bool cache;
+
+  Badge({
+    this.tag,
+    this.name,
+    this.id,
+    this.mipmap,
+    this.title,
+    this.description,
+    this.color,
+    this.cache = true,
+  });
+
+  Badge.fromJson(String? typename, String? typeid, Map<String, dynamic> json)
+      : tag = '$typename/$typeid',
+        name = typename,
+        id = typeid,
+        mipmap = [
+          json['image_url_1x'],
+          json['image_url_2x'],
+          json['image_url_4x'],
+        ],
+        title = json['title'],
+        description = json['description'],
+        color = null,
+        cache = true;
+}
+
+class TwitchEmote {
+  final String? id;
+  final int? startPosition;
+  final int? endPosition;
+
+  TwitchEmote({
+    this.id,
+    this.startPosition,
+    this.endPosition,
+  });
+}
+
+class MessageToken {
+  MessageTokenType type;
+  dynamic data;
+
+  MessageToken.text(String text)
+      : type = MessageTokenType.Text,
+        data = text;
+
+  MessageToken.link(String url)
+      : type = MessageTokenType.Link,
+        data = url;
+
+  MessageToken.image(String url)
+      : type = MessageTokenType.Image,
+        data = url;
+
+  MessageToken.video(String url)
+      : type = MessageTokenType.Video,
+        data = url;
+
+  MessageToken.emote(Emote emote)
+      : type = MessageTokenType.Emote,
+        data = emote;
+
+  MessageToken.emoteStack(List<Emote> emotes)
+      : type = MessageTokenType.EmoteStack,
+        data = emotes;
+
+  MessageToken.user(User user)
+      : type = MessageTokenType.User,
+        data = user;
+}
+
+class Credentials {
+  final int? id;
+  final String login;
+  final String? clientId;
+  final String? token;
+
+  const Credentials({
+    this.id,
+    this.login = 'justinfan64537',
+    this.clientId,
+    this.token,
+  });
+}
+
+class User {
+  String? login;
+  String? displayName;
+  int? id;
+  String? color;
+
+  User({
+    this.login,
+    this.displayName,
+    this.id,
+    this.color,
+  });
+}
+
+class Message {
+  Channel? channel;
+
+  User? user;
+  String? id;
+  String? body;
+
+  bool action = false;
+  bool mention = false;
+  bool blocked = false;
+  bool history = false; // TODO: Use a bitfield
+  bool deleted = false;
+
+  List<Badge> badges = [];
+  List<MessageToken> tokens = [];
+  List<TwitchEmote> twitchEmotes = [];
+
+  DateTime? dateTime;
+
+  /// DearKing mod: IRC-теги сообщения (нужны для ответов/веток).
+  Map<String, dynamic> tags = const {};
+
+  static String _unescapeTag(String v) => v
+      .replaceAll(r'\s', ' ')
+      .replaceAll(r'\:', ';')
+      .replaceAll(r'\r', '\r')
+      .replaceAll(r'\n', '\n')
+      .replaceAll(r'\\', '\\');
+
+  String? _tag(String k) {
+    final v = tags[k];
+    return (v == null || '$v'.isEmpty) ? null : _unescapeTag('$v');
+  }
+
+  /// Ответ на сообщение: id, логин, имя и текст родителя.
+  String? get replyParentId => _tag('reply-parent-msg-id');
+  String? get replyParentLogin => _tag('reply-parent-user-login');
+  String? get replyParentName => _tag('reply-parent-display-name') ?? replyParentLogin;
+  String? get replyParentBody => _tag('reply-parent-msg-body');
+
+  /// Корень ветки (первое сообщение, на которое начали отвечать).
+  String? get threadId => _tag('reply-thread-parent-msg-id') ?? replyParentId;
+
+  Message({
+    String tagBadges = '',
+    String tagEmotes = '',
+    this.channel,
+    this.user,
+    this.id,
+    this.body,
+    this.dateTime,
+    this.history = false,
+  }) {
+    // replace U+200D (ZERO WIDTH JOINER) with U+E0002
+    // alternative regex for replacement: (?<!\U000E0002)\U000E0002
+    var replacement = String.fromCharCodes(Runes('\u{e0002}'));
+    var zeroWidthJoiner = String.fromCharCodes(Runes('\u{200d}'));
+    body = body?.replaceAll(replacement, zeroWidthJoiner);
+
+    if (body!.contains(RegExp('ACTION .*'))) action = true;
+    if (action) body = body!.substring('ACTION '.length, body!.length - 1);
+
+    // body = body!.replaceAll(utf8.decode([0xF3, 0xA0, 0x80, 0x80]), '');
+
+    for (var tagBadge in tagBadges.split(',')) {
+      var badge = channel?.badges?.firstWhere((badge) => badge!.tag == tagBadge, orElse: () => channel!.client!.badges.firstWhereOrNull((badge) => badge.tag == tagBadge));
+      if (badge != null) badges.add(badge);
+    }
+
+    for (var tagEmote in tagEmotes.split('/')) {
+      var tagEmoteDetails = tagEmote.split(':');
+      if (tagEmoteDetails.length < 2) continue;
+      var tagEmoteId = tagEmoteDetails.first;
+      var tagEmotePositions = tagEmoteDetails.last.split(',');
+      for (var tagEmotePosition in tagEmotePositions.map((tagEmotePosition) => tagEmotePosition.split('-'))) {
+        twitchEmotes.add(
+          TwitchEmote(
+            id: tagEmoteId,
+            startPosition: int.parse(tagEmotePosition.first),
+            endPosition: int.parse(tagEmotePosition.last),
+          ),
+        );
+      }
+    }
+
+    twitchEmotes.sort((item, item2) => item2.startPosition!.compareTo(item.startPosition!));
+
+    try {
+      tokens = tokenize(body!);
+    } catch (e) {
+      print('$e: $body');
+    }
+
+    dateTime = dateTime ?? DateTime.now();
+  }
+
+  // TOOD: Needs a rework, maybe use "Type is Type" instead of wrappers with enum
+  List<MessageToken> tokenize(String body) {
+    const zeroWidthEmotes = <String>[
+      'SoSnowy',
+      'IceCold',
+      'SantaHat',
+      'TopHat',
+      'ReinDeer',
+      'CandyCane',
+      'cvMask',
+      'cvHazmat',
+    ];
+
+    var tokens = <MessageToken>[];
+
+    var runes = body.runes.toList();
+    for (var twitchEmote in twitchEmotes) {
+      runes.replaceRange(twitchEmote.startPosition!, twitchEmote.endPosition! + 1, utf8.encode(' ${twitchEmote.id}|${String.fromCharCodes(runes.getRange(twitchEmote.startPosition!, twitchEmote.endPosition! + 1))} '));
+    }
+
+    var runeBody = String.fromCharCodes(runes).replaceAll(utf8.decode([0xF3, 0xA0, 0x80, 0x80]), '');
+
+    var splits = runeBody.split(' ').where((split) => split.isNotEmpty);
+    mention = splits.any(
+      (split) => (split.toLowerCase() == '${channel?.receiver?.credentials?.login.toLowerCase()}' || split.toLowerCase() == '@${channel?.receiver?.credentials?.login.toLowerCase()}' || split.toLowerCase() == '${channel?.receiver?.credentials?.login.toLowerCase()},' || split.toLowerCase() == '@${channel?.receiver?.credentials?.login.toLowerCase()},'),
+    );
+
+    for (var messageSplit in splits) {
+      var client = channel?.transmitter?.client;
+
+      var twitchEmote;
+      if (messageSplit.startsWith('')) {
+        var emoteData = messageSplit.substring(1).split('|');
+
+        twitchEmote = Emote(
+          id: emoteData.first,
+          name: emoteData.last,
+          provider: 'Twitch',
+          mipmap: [
+            'https://static-cdn.jtvnw.net/emoticons/v2/${emoteData.first}/default/dark/1.0',
+            'https://static-cdn.jtvnw.net/emoticons/v2/${emoteData.first}/default/dark/2.0',
+            'https://static-cdn.jtvnw.net/emoticons/v2/${emoteData.first}/default/dark/3.0',
+            // 'https://static-cdn.jtvnw.net/emoticons/v2/${emoteData.first}/default/dark/4.0',
+          ],
+        );
+      }
+
+      var kickEmoteMatch = RegExp(r'^\[emote:(\d+):([^\]]+)\]$').firstMatch(messageSplit);
+      var kickEmote = kickEmoteMatch == null
+          ? null
+          : Emote(
+              id: kickEmoteMatch.group(1),
+              name: kickEmoteMatch.group(2),
+              provider: 'Kick',
+              mipmap: [kickEmoteUrl(kickEmoteMatch.group(1)!)],
+            );
+
+      var channelEmote = channel?.emotes.firstWhereOrNull((emote) => (emote.alt ?? emote.name) == messageSplit);
+      var globalEmote = client?.emotes.firstWhereOrNull((emote) => (emote.alt ?? emote.name) == messageSplit);
+      var emojiEmote = client?.emojis.firstWhereOrNull((emote) => (emote.alt ?? emote.name) == messageSplit);
+      var emote = twitchEmote ?? kickEmote ?? channelEmote ?? globalEmote ?? emojiEmote;
+      var lowSplit = messageSplit.toLowerCase();
+
+      if (lowSplit.startsWith('http://') || lowSplit.startsWith('https://')) {
+        // DearKing mod: расширение берём из пути, без ?query/#hash (cdn.discordapp.com/...png?ex=...)
+        final path = (Uri.tryParse(messageSplit)?.path ?? lowSplit).toLowerCase();
+        final ext = path.contains('.') ? path.substring(path.lastIndexOf('.') + 1) : '';
+        if (const ['png', 'jpg', 'jpeg', 'apng', 'gif', 'webp', 'avif', 'bmp'].contains(ext)) {
+          tokens.add(MessageToken.image(messageSplit));
+        } else if (const ['mp4', 'webm', 'mov', 'm4v', 'gifv'].contains(ext)) {
+          tokens.add(MessageToken.video(messageSplit));
+        } else {
+          tokens.add(MessageToken.link(messageSplit));
+        }
+      } else if (emote != null) {
+        bool isZeroWidth = (zeroWidthEmotes.contains(emote.name) || emote.zeroWidth);
+        if (tokens.isNotEmpty && tokens.last.type == MessageTokenType.Emote && isZeroWidth) {
+          tokens.last = MessageToken.emoteStack([tokens.last.data as Emote, emote]);
+        } else if (tokens.isNotEmpty && tokens.last.type == MessageTokenType.EmoteStack && isZeroWidth) {
+          (tokens.last.data as List<Emote>).add(emote);
+        } else {
+          tokens.add(MessageToken.emote(emote));
+        }
+      } else {
+        if (tokens.isNotEmpty && tokens.last.type == MessageTokenType.Text) {
+          tokens.last.data += ' $messageSplit';
+        } else {
+          tokens.add(MessageToken.text(messageSplit));
+        }
+      }
+    }
+    return tokens;
+  }
+}
+
+enum ChannelState {
+  Disconnected,
+  Connecting,
+  Connected,
+  Suspended,
+  Banned,
+}
+
+class Channel {
+  Client? client;
+  Connection? receiver;
+  Connection? transmitter;
+  String? name;
+  int? id;
+
+  List<Message> messages = [];
+  List<Emote> emotes = [];
+  List<Badge?> badges = [];
+  Map<String, List<String>> users = {};
+
+  var state = ChannelState.Disconnected;
+  set stateChanger(ChannelState newState) {
+    if (state == newState) {
+      return;
+    }
+
+    state = newState;
+
+    client!.listeners.forEach((listener) => listener.onChannelStateChange(this, state));
+  }
+
+  Future<void> loadHistory() async {
+    client!.listeners.forEach((listener) => listener.onHistoryLoaded(this));
+  }
+
+  // TODO: Rework this
+  Future<dynamic> updateUsers() async {
+    // var userListQuery = await GQL.request('''
+    //       query {
+    //         channel(id: "$id") {
+    //           chatters {
+    //             staff {
+    //               login
+    //             }
+    //             broadcasters {
+    //               login
+    //             }
+    //             moderators {
+    //               login
+    //             }
+    //             vips {
+    //               login
+    //             }
+    //             viewers {
+    //               login
+    //             }
+    //           }
+    //         }
+    //       }
+    //     ''');
+
+    // users = (userListQuery['data']['channel']['chatters'] as Map<String, dynamic>).map(
+    //   (key, chatterList) => MapEntry<String, List<String>>(
+    //     key,
+    //     List<String>.from(
+    //       chatterList.map(
+    //         (chatter) => chatter['login'],
+    //       ),
+    //     ),
+    //   ),
+    // );
+
+    // return users;
+    // var response = await http.get(Uri.parse('http://tmi.twitch.tv/group/user/${name!.substring(1)}/chatters'));
+    // var jsonResponse = jsonDecode(utf8.decode(response.bodyBytes));
+
+    // users = Map<String, List<String>>.from(jsonResponse['chatters'].map((k, v) => MapEntry(k, List<String>.from(v))));
+
+    // return users;
+
+    // users = {};
+
+    // try {
+    //   final response = await http.get(Uri.parse('https://api.chatsen.app/saikin/channel/users/${name!.substring(1)}'));
+    //   final responseJson = json.decode(utf8.decode(response.bodyBytes));
+    //   users = {
+    //     'users': [
+    //       for (final userData in responseJson.entries) userData.key as String,
+    //     ],
+    //   };
+    // } catch (e) {}
+    return users;
+  }
+
+  Future<void> updateBadges() async {
+    badges.clear();
+  }
+
+  Future<void> updateEmotes() async {
+    emotes.clear();
+    final kickUserId = kickClient.channelIds?.userId;
+    if (kickUserId == null) return;
+
+    try {
+      final response = await http.get(Uri.parse('https://7tv.io/v3/users/kick/$kickUserId'));
+      final responseJson = json.decode(utf8.decode(response.bodyBytes));
+      for (var emoteData in responseJson['emote_set']?['emotes'] ?? const []) {
+        final emote = Emote.from7TV(emoteData);
+        if (emote != null) emotes.add(emote);
+      }
+
+      final setId = responseJson['emote_set']?['id'];
+      if (setId is String && setId.isNotEmpty) {
+        sevenTvSetId = setId;
+        SevenTVEvents.instance.watch(this, setId);
+      }
+    } catch (e) {
+      print("Couldn't fetch Kick 7TV emotes: $e");
+    }
+  }
+
+  /// DearKing mod: id набора 7TV-эмоутов канала (для подписки на события).
+  String? sevenTvSetId;
+
+  final kickClient = KickChatClient();
+  StreamSubscription<KickChatMessage>? _kickMessages;
+  StreamSubscription<KickChatStatus>? _kickStatus;
+  bool _kickConnecting = false;
+
+  String get kickSlug => (name ?? '').replaceFirst('#', '');
+
+  Channel({
+    this.client,
+    this.receiver,
+    this.transmitter,
+    this.name,
+    this.id,
+  }) {
+    client!.listeners.forEach((listener) => listener.onChannelStateChange(this, state));
+  }
+
+  Future<void> connectKick() async {
+    if (_kickConnecting || state == ChannelState.Connected || state == ChannelState.Connecting) return;
+    _kickConnecting = true;
+    stateChanger = ChannelState.Connecting;
+    await _kickMessages?.cancel();
+    await _kickStatus?.cancel();
+    _kickMessages = kickClient.messages.listen(_receiveKickMessage);
+    _kickStatus = kickClient.status.listen((status) {
+      switch (status) {
+        case KickChatStatus.resolving:
+        case KickChatStatus.connecting:
+        case KickChatStatus.reconnecting:
+          stateChanger = ChannelState.Connecting;
+        case KickChatStatus.connected:
+          stateChanger = ChannelState.Connected;
+        case KickChatStatus.disconnected:
+          stateChanger = ChannelState.Disconnected;
+      }
+    });
+
+    try {
+      await kickClient.connect(kickSlug);
+      final ids = kickClient.channelIds;
+      id = ids?.userId ?? ids?.channelId;
+      await updateEmotes();
+      await loadHistory();
+    } catch (e) {
+      stateChanger = ChannelState.Disconnected;
+      _systemMessage(ircTr('Could not connect to $kickSlug: $e', 'Не удалось подключиться к $kickSlug: $e'));
+    } finally {
+      _kickConnecting = false;
+    }
+  }
+
+  void _receiveKickMessage(KickChatMessage data) {
+    final login = data.sender.slug.isNotEmpty ? data.sender.slug : data.sender.username.toLowerCase();
+    final chatMessage = Message(
+      channel: this,
+      user: User(
+        login: login,
+        displayName: data.sender.username,
+        id: data.sender.id,
+        color: data.sender.color?.replaceFirst('#', ''),
+      ),
+      id: data.id,
+      body: data.content,
+      dateTime: data.createdAt,
+    );
+    if (data.replyToId != null) {
+      chatMessage.tags = {
+        'reply-parent-msg-id': data.replyToId,
+        'reply-parent-user-login': data.replyToSlug ?? data.replyToSender ?? '',
+        'reply-parent-display-name': data.replyToSender ?? '',
+        'reply-parent-msg-body': data.replyToContent ?? '',
+        'reply-thread-parent-msg-id': data.replyToId,
+      };
+    }
+    chatMessage.badges.addAll([
+      for (final badge in data.sender.badges)
+        Badge(
+          tag: '${badge.type}/${badge.count ?? ''}',
+          name: badge.type,
+          id: badge.count?.toString(),
+          title: badge.text.isNotEmpty ? badge.text : badge.type,
+          description: badge.type,
+          mipmap: const [],
+        ),
+    ]);
+
+    users.putIfAbsent('users', () => []);
+    if (!users['users']!.contains(login)) users['users']!.add(login);
+    for (final token in chatMessage.tokens) {
+      if (token.type != MessageTokenType.Emote) continue;
+      final emote = token.data as Emote;
+      if (emote.provider == 'Kick' && emotes.none((e) => e.provider == 'Kick' && e.id == emote.id)) {
+        emotes.add(emote);
+      }
+    }
+
+    messages.add(chatMessage);
+    ircTrim(messages);
+    client!.listeners.forEach((listener) => listener.onMessage(this, chatMessage));
+  }
+
+  void _systemMessage(String text) {
+    final message = Message(channel: this, body: text, dateTime: DateTime.now());
+    messages.add(message);
+    ircTrim(messages);
+    client!.listeners.forEach((listener) => listener.onMessage(this, message));
+  }
+
+  Future<void> disposeKick() async {
+    SevenTVEvents.instance.unwatch(this);
+    await _kickMessages?.cancel();
+    await _kickStatus?.cancel();
+    await kickClient.dispose();
+  }
+
+  Future<void> send(String message, {bool action = false, String? replyTo}) async {
+    final token = transmitter?.credentials?.token;
+    final broadcasterUserId = kickClient.channelIds?.userId;
+    if (token == null || broadcasterUserId == null) {
+      _systemMessage(ircTr('Log in with Kick to send messages.', 'Войдите через Kick, чтобы отправлять сообщения.'));
+      return;
+    }
+
+    message = message.trim();
+    if (message.isEmpty) return;
+    final nativeEmotes = [...client!.emotes, ...emotes, ...?transmitter?.emotes].where((e) => e.provider == 'Kick' && e.name != null && e.id != null);
+    for (final emote in nativeEmotes) {
+      final pattern = RegExp('(^|\\s)${RegExp.escape(emote.name!)}(?=\\s|\$)');
+      message = message.replaceAllMapped(pattern, (match) => '${match.group(1)}[emote:${emote.id}:${emote.name}]');
+    }
+
+    try {
+      await client!.kickApi(token).sendMessage(
+        broadcasterUserId: broadcasterUserId,
+        content: message,
+        replyToMessageId: replyTo,
+      );
+    } catch (e) {
+      _systemMessage(ircTr('Message was not sent: $e', 'Сообщение не отправлено: $e'));
+    }
+  }
+}
+
+enum ConnectionState {
+  Disconnected,
+  AuthenticationError,
+  SocketError,
+  SocketTerminated,
+  Reconnecting,
+  Connected,
+}
+
+class Connection {
+  Client? client;
+  bool transmission;
+  Credentials? credentials;
+
+  List<String?> channelsToPart = [];
+
+  WebSocketChannel? webSocketChannel;
+  StreamSubscription? streamSubscription;
+
+  String get name => '${credentials!.login}@${transmission ? 'tx' : 'rx'}';
+  Iterable<Channel> get channels => client!.channels.where((channel) => channel.receiver == this);
+  List<Channel?> whispers = [];
+
+  var state = ConnectionState.Disconnected;
+  set stateChanger(ConnectionState newState) {
+    if (state == newState) {
+      return;
+    }
+
+    state = newState;
+
+    if (state != ConnectionState.Connected) {
+      channelsToPart.clear();
+      channels.forEach((channel) => channel.stateChanger = ChannelState.Disconnected);
+    }
+
+    client!.listeners.forEach((listener) => listener.onConnectionStateChange(this, state));
+  }
+
+  List<Emote> emotes = [];
+
+  Future<void> updateUserEmotes({
+    List<String> emoteSets = const [],
+  }) async {
+    if (credentials == null || credentials!.token == null || credentials!.clientId == null || credentials!.id == null) {
+      emotes.clear();
+      return;
+    }
+
+    if (emoteSets.isEmpty) {
+      emotes.clear();
+      // This is legacy af and will be deprecated
+      var emotesRequest = await http.get(
+        Uri.parse('https://api.twitch.tv/kraken/users/${credentials!.id}/emotes'),
+        headers: {
+          'Client-ID': credentials!.clientId!,
+          'Accept': 'application/vnd.twitchtv.v5+json',
+          'Authorization': 'OAuth ${credentials!.token}',
+        },
+      );
+
+      var jsonRequest = jsonDecode(emotesRequest.body);
+
+      for (var emoticonSet in jsonRequest['emoticon_sets'].entries) {
+        for (var emoteData in emoticonSet.value) {
+          emotes.add(
+            Emote(
+              name: emoteData['code'],
+              id: emoteData['id'].toString(),
+              provider: 'Twitch',
+              mipmap: [
+                'https://static-cdn.jtvnw.net/emoticons/v2/${emoteData['id']}/default/dark/1.0',
+                'https://static-cdn.jtvnw.net/emoticons/v2/${emoteData['id']}/default/dark/2.0',
+                'https://static-cdn.jtvnw.net/emoticons/v2/${emoteData['id']}/default/dark/3.0',
+                // 'https://static-cdn.jtvnw.net/emoticons/v2/${emoteData['id']}/default/dark/4.0',
+              ],
+            ),
+          );
+        }
+      }
+    } else {
+      var newEmotes = <Emote>[];
+      const maxSets = 25;
+      while (emoteSets.isNotEmpty) {
+        var emoteSetsPack = emoteSets.take(maxSets);
+
+        // print('== $emoteSetsPack');
+
+        var emotesRequest = await http.get(
+          Uri.parse('https://api.twitch.tv/helix/chat/emotes/set?${emoteSetsPack.map((x) => 'emote_set_id=$x').join('&')}'),
+          headers: {
+            'Client-ID': credentials!.clientId!,
+            'Authorization': 'Bearer ${credentials!.token}',
+          },
+        );
+
+        var jsonRequest = jsonDecode(emotesRequest.body);
+        // print(jsonRequest);
+
+        for (var emoteData in jsonRequest['data']) {
+          newEmotes.add(
+            Emote(
+              name: emoteData['name'],
+              id: emoteData['id'].toString(),
+              set: emoteData['emote_set_id'],
+              provider: 'Twitch',
+              mipmap: [
+                'https://static-cdn.jtvnw.net/emoticons/v2/${emoteData['id']}/default/dark/1.0',
+                'https://static-cdn.jtvnw.net/emoticons/v2/${emoteData['id']}/default/dark/2.0',
+                'https://static-cdn.jtvnw.net/emoticons/v2/${emoteData['id']}/default/dark/3.0',
+                // // 'https://static-cdn.jtvnw.net/emoticons/v2/${emoteData['id']}/default/dark/4.0',
+                // for (var url in emoteData['images'].values) url,
+              ],
+              // mipmap: List<String>.from(emoteData['images'].values),
+            ),
+          );
+        }
+
+        emoteSets = emoteSets.sublist(min(emoteSets.length, maxSets));
+      }
+      emotes = newEmotes;
+    }
+  }
+
+  Connection({
+    this.client,
+    this.transmission = false,
+    this.credentials,
+  }) {
+    client!.listeners.forEach((listener) => listener.onConnectionStateChange(this, state));
+
+    connect(credentials);
+  }
+
+  void joinWhisper(String name) {
+    whispers.add(Channel(
+      client: client,
+      receiver: this,
+      transmitter: this,
+      name: name,
+      id: 0,
+    ));
+  }
+
+  void partWhisper(String name) {
+    whispers.removeWhere((element) => element!.name == name);
+  }
+
+  void send(String data) async {
+    var message = IRCMessage.fromData(data);
+    // print('\x1b[31m< $name: ${message.command}: \x1b[37m$data\x1b[37m');
+    webSocketChannel!.sink.add(data);
+  }
+
+  void receive(String data) async {
+    var message = IRCMessage.fromData(data);
+    // print('\x1b[32m> $name: ${message.command}: \x1b[37m$data\x1b[37m');
+
+    switch (message?.command) {
+      case '372':
+        stateChanger = ConnectionState.Connected;
+        // await updateUserEmotes();
+        break;
+      case 'GLOBALUSERSTATE':
+        if (transmission) {
+          await updateUserEmotes(emoteSets: message!.tags['emote-sets'].split(','));
+          await client!.updateBadges();
+        }
+        break;
+      case 'PING':
+        send('PONG :${message!.parameters[1]}'); //  ?? 'tmi.twitch.tv'
+        break;
+      case 'RECONNECT':
+        // print('$name: Reconnect requested');
+        stateChanger = ConnectionState.Reconnecting;
+        await Future.delayed(Duration(seconds: 4));
+        connect(credentials);
+        break;
+      case 'ROOMSTATE':
+        var channel = channels.firstWhereOrNull((channel) => channel.name == message!.parameters[0]);
+        channel?.stateChanger = ChannelState.Connected;
+        channel?.id = int.tryParse(message!.tags['room-id']) ?? 22484632;
+        await channel?.updateEmotes();
+        await channel?.updateBadges();
+        await channel?.updateUsers();
+        await channel?.loadHistory();
+        break;
+      case 'NOTICE':
+        var channel = channels.firstWhereOrNull((channel) => channel.name == message!.parameters[0]);
+        if (message!.tags.containsKey('msg-id') ? message.tags['msg-id'] == 'msg_channel_suspended' : false) channel?.stateChanger = ChannelState.Suspended;
+        if (message.tags.containsKey('msg-id') ? message.tags['msg-id'] == 'msg_banned' : false) channel?.stateChanger = ChannelState.Banned;
+        try {
+          var chatMessage = Message(
+            channel: channel,
+            id: message.tags['id'],
+            body: message.parameters[1],
+            dateTime: DateTime.fromMillisecondsSinceEpoch(int.tryParse(message.tags['tmi-sent-ts']) ?? 0),
+          );
+
+          client!.listeners.forEach((listener) => listener.onMessage(channel, chatMessage));
+
+          channel?.messages.add(chatMessage);
+          if (channel != null) ircTrim(channel.messages);
+        } catch (e) {}
+        break;
+      case 'PRIVMSG':
+        var channel = channels.firstWhereOrNull((channel) => channel.name == message!.parameters[0]);
+
+        var chatMessage = Message(
+          channel: channel,
+          user: User(
+            login: message!.prefix.split('!').first.toLowerCase(),
+            displayName: message.tags['display-name'],
+            id: int.tryParse(message.tags['user-id']),
+            color: (message.tags['color'] == null || message.tags['color'].trim().isEmpty ? null : message.tags['color'].substring(1)),
+          ),
+          id: message.tags['id'],
+          body: message.parameters[1],
+          tagBadges: message.tags['badges'],
+          tagEmotes: message.tags['emotes'],
+        )..tags = message.tags;
+
+        channel?.users.putIfAbsent('users', () => []);
+        if (channel != null && chatMessage.user != null && chatMessage.user!.login != null) {
+          if (!channel.users['users']!.contains(chatMessage.user!.login!)) //.add();
+            channel.users['users']!.add(chatMessage.user!.login!);
+        }
+
+        client!.listeners.forEach((listener) => listener.onMessage(channel, chatMessage));
+
+        channel?.messages.add(chatMessage);
+        if (channel != null) ircTrim(channel.messages);
+        break;
+      case 'WHISPER':
+        if (!transmission) break;
+        var name = message!.prefix.split('!').first;
+        var channel = whispers.firstWhere((channel) => channel!.name == name, orElse: () {
+          joinWhisper(name);
+          return whispers.firstWhere((channel) => channel!.name == name, orElse: () => null);
+        });
+        if (channel == null) break;
+
+        var chatMessage = Message(
+          channel: channel,
+          user: User(
+            login: message.prefix.split('!').first.toLowerCase(),
+            displayName: message.tags['display-name'],
+            id: int.tryParse(message.tags['user-id']),
+            color: (message.tags['color'] == null || message.tags['color'].trim().isEmpty ? null : message.tags['color'].substring(1)),
+          ),
+          id: message.tags['id'],
+          body: message.parameters[1],
+          // tagBadges: message.tags['badges'],
+          tagEmotes: message.tags['emotes'],
+        );
+
+        channel.messages.add(chatMessage);
+        ircTrim(channel.messages);
+        client!.listeners.forEach((listener) => listener.onWhisper(channel, chatMessage));
+        break;
+
+      case 'CLEARMSG':
+        try {
+          print(message?.raw);
+          var channel = channels.firstWhereOrNull((channel) => channel.name == message!.parameters[0]);
+          // var channel = client.channels.state.firstWhere((channel) => channel.state is ChannelStateWithConnection && (channel.state as ChannelStateWithConnection).receiver == this && channel.name == channelName);
+
+          var chatMessage = Message(
+            channel: channel,
+            id: message!.tags['id'],
+            body: ircTr('A message from ${message.tags['login']} was deleted: ${message.parameters[1]}', 'Сообщение от ${message.tags['login']} удалено: ${message.parameters[1]}'),
+            dateTime: DateTime.now(),
+          );
+
+          client!.listeners.forEach((listener) => listener.onMessage(channel, chatMessage));
+
+          channel?.messages.add(chatMessage);
+          if (channel != null) ircTrim(channel.messages);
+        } catch (e) {}
+        break;
+      case 'CLEARCHAT':
+        try {
+          var channel = channels.firstWhereOrNull((channel) => channel.name == message!.parameters[0]);
+          var duration = message!.tags['ban-duration'] == null ? null : Duration(seconds: int.tryParse(message.tags['ban-duration']) ?? 0);
+          var uid = int.tryParse(message.tags['target-user-id'] ?? '');
+
+          if (uid != null) {
+            channel?.messages.where((msg) => msg.user != null && msg.user!.id == uid).forEach((element) {
+              element.deleted = true;
+            });
+          } else {
+            channel?.messages.forEach((element) {
+              element.deleted = true;
+            });
+          }
+
+          var chatMessage = Message(
+            channel: channel,
+            // id: message.tags['id'],
+            body: uid != null
+                ? (duration != null
+                    ? ircTr('${message.parameters[1]} has been timed out for ${ircDuration(duration)}', '${message.parameters[1]} получил таймаут на ${ircDuration(duration)}')
+                    : ircTr('${message.parameters[1]} has been permabanned', '${message.parameters[1]} забанен навсегда'))
+                : ircTr('Chat has been cleared by a moderator', 'Модератор очистил чат'),
+            dateTime: DateTime.now(),
+          );
+
+          client!.listeners.forEach((listener) => listener.onMessage(channel, chatMessage));
+
+          channel?.messages.add(chatMessage);
+          if (channel != null) ircTrim(channel.messages);
+        } catch (e) {}
+        break;
+      case 'USERNOTICE':
+        try {
+          // Raid:
+          // @badge-info=;badges=;color=#FF69B4;display-name=TimeClova;emotes=;flags=;id=02139f6a-5cc1-4515-8b0c-aca140a6d6cd;login=timeclova;mod=0;msg-id=raid;msg-param-displayName=TimeClova;msg-param-login=timeclova;msg-param-profileImageURL=https://static-cdn.jtvnw.net/jtv_user_pictures/85e6c1f6-ae9a-4534-a7b4-bcb89a05c1de-profile_image-70x70.png;msg-param-viewerCount=56;room-id=192434734;subscriber=0;system-msg=56\sraiders\sfrom\sTimeClova\shave\sjoined!;tmi-sent-ts=1627730280158;user-id=590368354;user-type= :tmi.twitch.tv USERNOTICE #aimsey
+
+          // Sub with message:
+          // @badge-info=subscriber/4;badges=subscriber/3,premium/1;color=#008000;display-name=surbeonxbox;emotes=;flags=;id=707c4e3c-3cb7-422e-9c1c-00bd431338bc;login=surbeonxbox;mod=0;msg-id=resub;msg-param-cumulative-months=4;msg-param-months=0;msg-param-multimonth-duration=0;msg-param-multimonth-tenure=0;msg-param-should-share-streak=1;msg-param-streak-months=4;msg-param-sub-plan-name=Channel\sSubscription\s(xqcow);msg-param-sub-plan=1000;msg-param-was-gifted=false;room-id=71092938;subscriber=1;system-msg=surbeonxbox\ssubscribed\sat\sTier\s1.\sThey've\ssubscribed\sfor\s4\smonths,\scurrently\son\sa\s4\smonth\sstreak!;tmi-sent-ts=1627730157904;user-id=514719264;user-type= :tmi.twitch.tv USERNOTICE #xqcow :YUP
+
+          // Gifted sub:
+          // @badge-info=subscriber/13;badges=subscriber/12,glhf-pledge/1;color=#A175B7;display-name=Tharus1337;emotes=;flags=;id=921661da-239e-462d-9a65-5779104816e1;login=tharus1337;mod=0;msg-id=subgift;msg-param-gift-months=1;msg-param-months=32;msg-param-origin-id=b3\s21\sd7\s86\s67\s5c\s59\sdd\sd3\s56\sde\s65\se7\s54\s36\s6e\s17\s76\s82\se0;msg-param-recipient-display-name=truncated_xD;msg-param-recipient-id=91434296;msg-param-recipient-user-name=truncated_xd;msg-param-sender-count=1;msg-param-sub-plan-name=Channel\sSubscription\s(forsenlol);msg-param-sub-plan=1000;room-id=22484632;subscriber=1;system-msg=Tharus1337\sgifted\sa\sTier\s1\ssub\sto\struncated_xD!\sThis\sis\stheir\sfirst\sGift\sSub\sin\sthe\schannel!;tmi-sent-ts=1627730596864;user-id=72864797;user-type= :tmi.twitch.tv USERNOTICE #forsen
+
+          // Sub with message 2:
+          // @badge-info=;badges=glhf-pledge/1;color=#FF1493;display-name=splizhh;emotes=;flags=;id=92a97eba-d684-406d-8ca3-21e95c1cc874;login=splizhh;mod=0;msg-id=resub;msg-param-cumulative-months=6;msg-param-months=0;msg-param-multimonth-duration=0;msg-param-multimonth-tenure=0;msg-param-should-share-streak=1;msg-param-streak-months=5;msg-param-sub-plan-name=Channel\sSubscription\s(xqcow);msg-param-sub-plan=Prime;msg-param-was-gifted=false;room-id=71092938;subscriber=1;system-msg=splizhh\ssubscribed\swith\sPrime.\sThey've\ssubscribed\sfor\s6\smonths,\scurrently\son\sa\s5\smonth\sstreak!;tmi-sent-ts=1627742216686;user-id=230654107;user-type= :tmi.twitch.tv USERNOTICE #xqcow :pog
+
+          var channel = channels.firstWhereOrNull((channel) => channel.name == message!.parameters[0]);
+
+          var chatMessage = Message(
+            channel: channel,
+            id: message!.tags['id'],
+            body: message.tags['system-msg'].replaceAll('\\s', ' ') + message.parameters.length >= 2 ? message.parameters[1] : '',
+            dateTime: DateTime.fromMillisecondsSinceEpoch(int.tryParse(message.tags['tmi-sent-ts']) ?? 0),
+            user: User(
+              login: message.prefix.split('!').first,
+              displayName: message.tags['display-name'],
+              id: int.tryParse(message.tags['user-id']),
+              color: message.tags['color'],
+            ),
+          );
+
+          client!.listeners.forEach((listener) => listener.onMessage(channel, chatMessage));
+
+          channel?.messages.add(chatMessage);
+          if (channel != null) ircTrim(channel.messages);
+        } catch (e) {}
+        break;
+    }
+  }
+
+  void connect(Credentials? newCredentials) async {
+    credentials = newCredentials ?? credentials;
+    stateChanger = ConnectionState.Connected;
+  }
+
+  Future<void> dispose() async {
+    stateChanger = ConnectionState.Disconnected;
+    await streamSubscription?.cancel();
+    webSocketChannel = null;
+  }
+}
+
+class Client {
+  List<Listener> listeners = [];
+
+  Credentials credentials;
+  Map<Credentials?, List<Connection>> receivers = {};
+  Map<Credentials?, Connection> transmitters = {};
+  List<Channel> channels = [];
+  List<Emote> emotes = [];
+  List<Emote> emojis = [];
+  List<Badge> badges = [];
+  bool useRecentMessages;
+
+  Timer? timer;
+  final _kickRetryAfter = <Channel, DateTime>{};
+  KickApiClient? _kickApi;
+  String? _kickApiToken;
+
+  KickApiClient kickApi(String token) {
+    if (_kickApi == null || _kickApiToken != token) {
+      _kickApi?.dispose();
+      _kickApiToken = token;
+      _kickApi = KickApiClient(accessToken: token);
+    }
+    return _kickApi!;
+  }
+
+  // TODO: Rework this
+  Future<void> updateBadges() async {
+    badges.clear();
+
+    try {
+      var request = await http.get(
+        Uri.parse('https://api.twitch.tv/helix/chat/badges/global'), // https://badges.twitch.tv/v1/badges/global/display
+        headers: {
+          'Client-ID': credentials.clientId!,
+          'Authorization': 'Bearer ${credentials.token}',
+        },
+      );
+      var jsonRequest = jsonDecode(request.body);
+
+      for (var categories in jsonRequest['data']) {
+        for (var badgeData in categories['versions']) {
+          badges.add(
+            Badge.fromJson(
+              categories['set_id'],
+              badgeData['id'],
+              badgeData,
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      print('Couldn\'t load Twitch global badges');
+    }
+  }
+
+  // TODO: Rework this to not clear emotes before they are acquired and only clear if we can receive new ones, maybe return difference?
+  Future<void> updateEmotes() async {
+    emotes.clear();
+    emojis.clear();
+
+    try {
+      var response = await http.get(Uri.parse('https://raw.githubusercontent.com/iamcal/emoji-data/master/emoji.json'));
+      var jsonResponse = jsonDecode(utf8.decode(response.bodyBytes));
+
+      for (var entry in jsonResponse.where((entry) => entry['has_img_twitter'] == true && entry['category'] != 'Component')) {
+        var emote = Emote(
+          category: entry['category'],
+          order: entry['sort_order'] ?? 0,
+          alt: entry['unified'].split('-').map((x) => String.fromCharCode(int.parse(x, radix: 16))).join(),
+          name: entry['short_name'],
+          // id: emoteData['id'],
+          provider: 'Emoji',
+          // mipmap: List<String>.from(
+          //   emoteData['urls'].values.map(
+          //         (url) => 'https:$url',
+          //       ),
+          // ),
+          mipmap: [
+            'https://raw.githubusercontent.com/iamcal/emoji-data/master/img-twitter-72/${entry['image']}',
+          ],
+        );
+
+        emojis.add(emote);
+      }
+      // DearKing mod: как в стандартной клавиатуре — по категориям, внутри по sort_order
+      emojis.sort((a, b) {
+        final ca = Emote.emojiCategories.indexOf(a.category ?? ''), cb = Emote.emojiCategories.indexOf(b.category ?? '');
+        return ca != cb ? ca.compareTo(cb) : a.order.compareTo(b.order);
+      });
+    } catch (e) {
+      // print(e);
+      print('Couldn\'t load emojis');
+    }
+
+    try {
+      final staticEmotes = await ChatsenStatic.staticEmotes();
+
+      for (final staticEmote in staticEmotes) {
+        emotes.add(
+          Emote(
+            name: staticEmote.name,
+            id: staticEmote.id,
+            provider: 'Chatsen',
+            mipmap: [
+              staticEmote.url,
+            ],
+            zeroWidth: (staticEmote.modifiers & (1 << 1)) == (1 << 1),
+          ),
+        );
+      }
+    } catch (e) {
+      print("Couldn't fetch Chatsen static emotes");
+    }
+
+    try {
+      var emotesRequest = await http.get(Uri.parse('https://api.frankerfacez.com/v1/set/global'));
+      var jsonRequest = jsonDecode(emotesRequest.body);
+
+      for (var emoteSetEntry in jsonRequest['sets'].entries) {
+        var emoteSet = emoteSetEntry.value;
+        for (var emoteData in emoteSet['emoticons']) {
+          var emote = Emote(
+            name: emoteData['name'],
+            id: '${emoteData['id']}',
+            provider: 'FFZ',
+            mipmap: [
+              // DearKing mod: у анимированных FFZ-эмоутов в 'urls' лежит статичный кадр,
+              // а анимация (WebP) — в отдельном поле 'animated'
+              for (var url in ((emoteData['animated'] is Map && (emoteData['animated'] as Map).isNotEmpty) ? emoteData['animated'] : emoteData['urls']).values) url.startsWith('http') ? url : 'https:$url',
+            ],
+          );
+
+          emotes.add(emote);
+        }
+      }
+    } catch (e) {
+      print("Couldn't fetch FFZ emotes");
+    }
+
+    try {
+      var emotesRequest = await http.get(Uri.parse('https://api.betterttv.net/3/cached/emotes/global'));
+      var jsonRequest = jsonDecode(emotesRequest.body);
+
+      for (var emoteData in jsonRequest) {
+        var emote = Emote(
+          name: emoteData['code'],
+          id: emoteData['id'],
+          provider: 'BTTV',
+          mipmap: [
+            'https://cdn.betterttv.net/emote/${emoteData["id"]}/1x',
+            'https://cdn.betterttv.net/emote/${emoteData["id"]}/2x',
+            'https://cdn.betterttv.net/emote/${emoteData["id"]}/3x',
+            // 'https://cdn.betterttv.net/emote/${emoteData["id"]}/4x',
+          ],
+        );
+
+        emotes.add(emote);
+      }
+    } catch (e) {
+      print("Couldn't fetch BTTV emotes");
+    }
+
+    try {
+      // for (var i = 1; true; ++i) {
+      //   var data = await GQL.request7('''
+      //     query {
+      //       search_emotes(query: "", globalState: "only", limit: 150, pageSize: 150, page: $i) {
+      //         id
+      //         name
+      //         urls
+      //         provider
+      //         visibility
+      //       }
+      //     }
+      //   ''');
+
+      //   var emotesData = data['data']['search_emotes'];
+
+      //   for (var emoteData in emotesData) {
+      //     if (emoteData['urls'].isEmpty) {
+      //       continue;
+      //     }
+
+      //     var emote = Emote(
+      //       name: emoteData['name'],
+      //       id: emoteData['id'],
+      //       provider: '7TV',
+      //       mipmap: [
+      //         for (var url in emoteData['urls']) url.last,
+      //       ],
+      //       zeroWidth: (emoteData['visibility'] & (1 << 7)) == (1 << 7),
+      //     );
+
+      //     emotes.add(emote);
+      //   }
+
+      //   if (emotesData.length < 150) break;
+      // }
+
+      // https://api.7tv.app/v3/emote-sets/global
+      final response = await http.get(Uri.parse('https://7tv.io/v3/emote-sets/global'));
+      final responseJson = json.decode(utf8.decode(response.bodyBytes));
+      for (final emote in responseJson['emotes']) {
+        emotes.add(Emote(
+          name: emote['name'],
+          id: emote['id'],
+          provider: '7TV',
+          mipmap: [
+            for (final url in emote['data']['host']['files'].where((x) => x['format'] != 'AVIF')) 'https:${emote['data']['host']['url']}/${url['name']}',
+          ],
+          zeroWidth: (emote['data']['flags'] & (1 << 8)) == (1 << 8),
+        ));
+      }
+    } catch (e) {
+      print("Couldn't fetch 7TV emotes: $e");
+    }
+  }
+
+  Client({
+    this.credentials = const Credentials(),
+    this.useRecentMessages = true,
+  }) {
+    updateEmotes();
+    timer = Timer.periodic(
+      Duration(seconds: 2),
+      (timer) async => consumeChannelBucket(),
+    );
+  }
+
+  void consumeChannelBucket() async {
+    final now = DateTime.now();
+    for (final channel in channels.where((channel) =>
+        channel.state == ChannelState.Disconnected &&
+        channel.receiver!.state == ConnectionState.Connected &&
+        (_kickRetryAfter[channel] == null || now.isAfter(_kickRetryAfter[channel]!)))) {
+      try {
+        await channel.connectKick();
+        _kickRetryAfter.remove(channel);
+      } catch (_) {
+        _kickRetryAfter[channel] = DateTime.now().add(Duration(seconds: 15));
+      }
+    }
+  }
+
+  Future<void> swapCredentials(Credentials newCredentials) async {
+    credentials = newCredentials;
+    for (final connection in receivers.values.expand((connections) => connections)) {
+      connection.credentials = newCredentials;
+      connection.stateChanger = ConnectionState.Connected;
+    }
+    for (final connection in transmitters.values) {
+      connection.credentials = newCredentials;
+      connection.stateChanger = ConnectionState.Connected;
+    }
+  }
+
+  Future<List<Connection?>> acquireConnections({Credentials? receiverCredentials, Credentials? transmitterCredentials}) async {
+    if (receivers[receiverCredentials] == null) {
+      receivers[receiverCredentials] = <Connection>[];
+    }
+
+    var bestSuitedReceiver = receivers[receiverCredentials]!.firstWhere(
+      (connection) => connection.channels.length < 100,
+      orElse: () {
+        var receiver = Connection(client: this, credentials: receiverCredentials ?? credentials);
+        receivers[receiverCredentials]!.add(receiver);
+        return receiver;
+      },
+    );
+
+    if (transmitters[transmitterCredentials] == null) {
+      transmitters[transmitterCredentials] = Connection(client: this, credentials: transmitterCredentials ?? credentials, transmission: true);
+    }
+
+    return [bestSuitedReceiver, transmitters[transmitterCredentials]];
+  }
+
+  Future<List<Channel>> swapChannels(List<Channel> channelsToSwap, {Credentials? receiverCredentials, Credentials? transmitterCredentials}) async {
+    var swappedChannels = <Channel>[];
+
+    for (var channel in channelsToSwap) {
+      channel.receiver!.channelsToPart.add(channel.name);
+
+      var connections = await acquireConnections(receiverCredentials: receiverCredentials, transmitterCredentials: transmitterCredentials);
+
+      channel.receiver = connections.first;
+      channel.transmitter = connections.last;
+      channel.stateChanger = ChannelState.Disconnected;
+      swappedChannels.add(channel);
+      // TODO: Kill connection if there are no channels left
+    }
+
+    return swappedChannels;
+  }
+
+  Future<List<Channel>> joinChannels(List<dynamic> channelsToJoin, {Credentials? receiverCredentials, Credentials? transmitterCredentials}) async {
+    var joinedChannels = <Channel>[];
+
+    for (var channelToJoin in channelsToJoin) {
+      if (channelToJoin.runtimeType != String) {
+        throw 'Joining channels by id isn\'t supported yet.';
+      }
+
+      var connections = await acquireConnections(receiverCredentials: receiverCredentials, transmitterCredentials: transmitterCredentials);
+
+      var channel = Channel(client: this, name: channelToJoin.toLowerCase(), receiver: connections.first, transmitter: connections.last);
+      channels.add(channel);
+      joinedChannels.add(channel);
+    }
+
+    return joinedChannels;
+  }
+
+  void partChannels(List<Channel> channelsToPart) async {
+    for (var channelToLeave in channelsToPart) {
+      channels.remove(channelToLeave);
+      await channelToLeave.disposeKick();
+    }
+  }
+
+  void dispose() async {
+    timer?.cancel();
+    _kickApi?.dispose();
+    for (final channel in channels) {
+      await channel.disposeKick();
+    }
+  }
+}
+
+class GQL {
+  static Future<dynamic> request7(String gql, {Credentials? credentials}) async {
+    var request = await http.post(
+      Uri.parse('https://api.7tv.app/v2/gql'),
+      body: jsonEncode({'query': gql}),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    );
+    return jsonDecode(utf8.decode(request.bodyBytes));
+  }
+}
+
+
+/// DearKing mod: живые события 7TV (EventAPI v3). Одно соединение на всё приложение,
+/// подписка на emote_set.update для каждого открытого канала. При изменении набора
+/// эмоутов обновляет channel.emotes и добавляет в чат системную плашку.
+class SevenTVEvents {
+  SevenTVEvents._();
+  static final SevenTVEvents instance = SevenTVEvents._();
+
+  WebSocketChannel? _ws;
+  StreamSubscription? _sub;
+  Timer? _retry;
+  bool _connecting = false;
+  final Map<String, Channel> _bySet = {};
+
+  void watch(Channel channel, String setId) {
+    _bySet.removeWhere((k, v) => v == channel && k != setId);
+    final isNew = !_bySet.containsKey(setId);
+    _bySet[setId] = channel;
+    if (_ws == null) {
+      _connect();
+    } else if (isNew) {
+      _send(35, setId);
+    }
+  }
+
+  void unwatch(Channel channel) {
+    final ids = _bySet.entries.where((e) => e.value == channel).map((e) => e.key).toList();
+    for (final id in ids) {
+      _bySet.remove(id);
+      _send(36, id);
+    }
+  }
+
+  void _send(int op, String setId) {
+    try {
+      _ws?.sink.add(jsonEncode({
+        'op': op,
+        'd': {
+          'type': 'emote_set.update',
+          'condition': {'object_id': setId},
+        },
+      }));
+    } catch (_) {}
+  }
+
+  void _connect() {
+    if (_connecting || _bySet.isEmpty) return;
+    _connecting = true;
+    try {
+      final ws = WebSocketChannel.connect(Uri.parse('wss://events.7tv.io/v3'));
+      _ws = ws;
+      _sub = ws.stream.listen(
+        (raw) {
+          try {
+            final msg = jsonDecode('$raw');
+            switch (msg['op']) {
+              case 1: // hello — подписываемся на все открытые каналы
+                _connecting = false;
+                for (final id in _bySet.keys) {
+                  _send(35, id);
+                }
+                break;
+              case 0: // dispatch
+                _handle(msg['d']);
+                break;
+              case 7: // end of stream / reconnect
+                _drop();
+                break;
+            }
+          } catch (_) {}
+        },
+        onError: (_) => _drop(),
+        onDone: _drop,
+        cancelOnError: true,
+      );
+    } catch (_) {
+      _drop();
+    }
+  }
+
+  void _drop() {
+    _connecting = false;
+    _sub?.cancel();
+    _sub = null;
+    try {
+      _ws?.sink.close();
+    } catch (_) {}
+    _ws = null;
+    _retry?.cancel();
+    if (_bySet.isNotEmpty) _retry = Timer(const Duration(seconds: 10), _connect);
+  }
+
+  void _handle(dynamic d) {
+    if (d is! Map || d['type'] != 'emote_set.update') return;
+    final body = d['body'];
+    if (body is! Map) return;
+    final channel = _bySet['${body['id']}'];
+    if (channel == null) return;
+    final actor = body['actor']?['display_name'] ?? body['actor']?['username'] ?? '7TV';
+
+    for (final p in (body['pushed'] as List? ?? const [])) {
+      if (p['key'] != 'emotes' || p['value'] is! Map) continue;
+      final emote = Emote.from7TV(p['value']);
+      if (emote == null) continue;
+      channel.emotes.removeWhere((e) => e.provider == '7TV' && e.id == emote.id);
+      channel.emotes.add(emote); // сначала эмоут — тогда в плашке он сразу отрисуется картинкой
+      _notify(channel, ircTr('$actor added 7TV emote ${emote.name}', '$actor добавил 7TV-эмоут ${emote.name}'));
+    }
+    for (final p in (body['pulled'] as List? ?? const [])) {
+      if (p['key'] != 'emotes' || p['old_value'] is! Map) continue;
+      final old = p['old_value'];
+      final name = '${old['name']}';
+      channel.emotes.removeWhere((e) => e.provider == '7TV' && (e.id == '${old['id']}' || e.name == name));
+      _notify(channel, ircTr('$actor removed 7TV emote $name', '$actor удалил 7TV-эмоут $name'));
+    }
+    for (final p in (body['updated'] as List? ?? const [])) {
+      if (p['key'] != 'emotes' || p['value'] is! Map || p['old_value'] is! Map) continue;
+      final oldName = '${p['old_value']['name']}';
+      final emote = Emote.from7TV(p['value']);
+      if (emote == null) continue;
+      channel.emotes.removeWhere((e) => e.provider == '7TV' && (e.id == emote.id || e.name == oldName));
+      channel.emotes.add(emote);
+      _notify(channel, ircTr('$actor renamed 7TV emote $oldName → ${emote.name}', '$actor переименовал 7TV-эмоут $oldName → ${emote.name}'));
+    }
+  }
+
+  void _notify(Channel channel, String text) {
+    final message = Message(channel: channel, body: text, dateTime: DateTime.now());
+    channel.messages.add(message);
+    ircTrim(channel.messages);
+    channel.client?.listeners.forEach((listener) => listener.onMessage(channel, message));
+  }
+}

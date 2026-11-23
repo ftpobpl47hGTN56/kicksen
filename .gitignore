@@ -1,16 +1,30 @@
 # Dart / Flutter
 .dart_tool/
 .packages
+.pub/
+.pub-cache/
 .flutter-plugins
 .flutter-plugins-dependencies
 build/
+**/build/
+*.log
 
 # Local credentials and app state
 .kick_token.json
 .kick_channels.json
-
-# Local tooling
+Kicksen KICK_CLIENT_ID.txt
+*.env
+.dev.vars
 **/.wrangler/
+
+# Local Android / Gradle configuration
+local.properties
+.gradle/
+.kotlin/
+.cxx/
+*.jks
+*.keystore
+key.properties
 
 # IDE
 .idea/
@@ -20,3 +34,11 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# iOS generated files
+ios/Flutter/ephemeral/
+ios/Flutter/Generated.xcconfig
+ios/Flutter/flutter_export_environment.sh
+ios/Runner/GeneratedPluginRegistrant.*
+ios/Pods/
+ios/.symlinks/

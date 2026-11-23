@@ -10,8 +10,10 @@ import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketAddress
 import java.net.SocketException
 import java.net.URL
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLSocketFactory
@@ -21,21 +23,22 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "kicksen/oauth_proxy")
             .setMethodCallHandler { call, result ->
-                if (call.method != "post") {
+                if (call.method != "request") {
                     result.notImplemented()
                     return@setMethodCallHandler
                 }
+                val method = call.argument<String>("method")
                 val url = call.argument<String>("url")
                 val headers = call.argument<Map<String, String>>("headers")
                 val body = call.argument<ByteArray>("body")
-                if (url == null || body == null) {
-                    result.error("INVALID_REQUEST", "Missing URL or body", null)
+                if (method == null || url == null) {
+                    result.error("INVALID_REQUEST", "Missing method or URL", null)
                     return@setMethodCallHandler
                 }
 
                 Thread {
                     try {
-                        val response = post(url, headers.orEmpty(), body)
+                        val response = request(method, url, headers.orEmpty(), body ?: ByteArray(0))
                         Handler(Looper.getMainLooper()).post { result.success(response) }
                     } catch (error: Exception) {
                         Handler(Looper.getMainLooper()).post {
@@ -46,7 +49,8 @@ class MainActivity : FlutterActivity() {
             }
     }
 
-    private fun post(
+    private fun request(
+        method: String,
         url: String,
         headers: Map<String, String>,
         body: ByteArray,
@@ -54,17 +58,24 @@ class MainActivity : FlutterActivity() {
         val target = URL(url)
         val connection = target.openConnection() as HttpsURLConnection
         if (target.host.endsWith(".workers.dev")) {
-            connection.sslSocketFactory = WorkerSslSocketFactory(target.host)
+            connection.sslSocketFactory = WorkerSslSocketFactory(
+                target.host,
+                if (target.port >= 0) target.port else 443,
+            )
         }
 
         return try {
-            connection.requestMethod = "POST"
+            val requestMethod = method.uppercase(Locale.ROOT)
+            val hasBody = requestMethod in setOf("POST", "PUT", "PATCH")
+            connection.requestMethod = requestMethod
             connection.connectTimeout = 15000
             connection.readTimeout = 20000
-            connection.doOutput = true
             headers.forEach { (name, value) -> connection.setRequestProperty(name, value) }
-            connection.setFixedLengthStreamingMode(body.size)
-            connection.outputStream.use { it.write(body) }
+            if (hasBody) {
+                connection.doOutput = true
+                connection.setFixedLengthStreamingMode(body.size)
+                connection.outputStream.use { it.write(body) }
+            }
 
             val status = connection.responseCode
             val stream = if (status >= 400) connection.errorStream else connection.inputStream
@@ -132,14 +143,27 @@ private object WorkerDns {
     }
 }
 
-private class WorkerSslSocketFactory(private val expectedHost: String) : SSLSocketFactory() {
+private class WorkerSocket(host: String, port: Int) : Socket() {
+    init {
+        super.connect(InetSocketAddress(WorkerDns.resolve(host), port), 15000)
+    }
+
+    override fun connect(endpoint: SocketAddress?, timeout: Int) {
+        if (!isConnected) super.connect(endpoint, timeout)
+    }
+}
+
+private class WorkerSslSocketFactory(
+    private val expectedHost: String,
+    private val expectedPort: Int,
+) : SSLSocketFactory() {
     private val delegate = getDefault() as SSLSocketFactory
 
     override fun getDefaultCipherSuites(): Array<String> = delegate.defaultCipherSuites
 
     override fun getSupportedCipherSuites(): Array<String> = delegate.supportedCipherSuites
 
-    override fun createSocket(): Socket = delegate.createSocket()
+    override fun createSocket(): Socket = WorkerSocket(expectedHost, expectedPort)
 
     override fun createSocket(host: String, port: Int): Socket = connect(host, port, null, 0)
 
