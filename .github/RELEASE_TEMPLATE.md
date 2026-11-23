@@ -2,6 +2,17 @@
 
 Short one-sentence summary of this release.
 
+## Screenshots
+
+<table>
+  <tr>
+    <td><img src="https://github.com/user-attachments/assets/0a38f54a-37f8-4c5d-ad7b-df3c89bb45a3" alt="Chat settings" /></td>
+    <td><img src="https://github.com/user-attachments/assets/eb799aed-e9c6-466e-9532-b3ff31ecdc91" alt="Viewer list" /></td>
+    <td><img src="https://github.com/user-attachments/assets/32543904-13de-4303-8fda-c134679bfa34" alt="Kick chat and emotes" /></td>
+    <td><img src="https://github.com/user-attachments/assets/3dfebffe-0668-40ef-b792-b70a6e31cbb0" alt="Kick accounts" /></td>
+  </tr>
+</table>
+
 ## What's new
 
 - New feature or improvement.
