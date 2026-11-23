@@ -40,7 +40,7 @@ Download **`ChatsenKick-1.1.105-kick-2026.11.23-0709-3625929-release.apk`** from
 SHA-256:
 
 ```text
-PASTE_APK_SHA256_HERE
+e4f1943266cc3eed03d44547b59c04f553a83fd64839263f7628895fc19377be
 ```
 
 ## Installation
